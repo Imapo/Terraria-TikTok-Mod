@@ -98,6 +98,23 @@ public class TikFinityClient : ModSystem
         }
     }
 
+    private bool IsFollower(JsonElement root)
+    {
+        if (root.TryGetProperty("isSubscribed", out var sub1) && sub1.ValueKind == JsonValueKind.True)
+            return true;
+
+        if (root.TryGetProperty("isFollower", out var sub2) && sub2.ValueKind == JsonValueKind.True)
+            return true;
+
+        if (root.TryGetProperty("follow", out var sub3) && sub3.ValueKind == JsonValueKind.True)
+            return true;
+
+        if (root.TryGetProperty("event", out var ev) && ev.GetString() == "follow")
+            return true;
+
+        return false;
+    }
+
 
     private void HandleMessage(string json)
     {
@@ -130,9 +147,17 @@ public class TikFinityClient : ModSystem
                 case "member":
                 case "roomUser":
                 case "join":
-                case "": // Если нет поля event, считаем входом
-                    SpawnViewerButterfly(nickname);
-                    break;
+                case "":
+                    {
+                        bool isFollower = IsFollower(root);
+
+                        if (isFollower)
+                            SpawnSubscriberSlime(nickname); // ✅ подписчик
+                        else
+                            SpawnViewerButterfly(nickname); // обычный зритель
+
+                        break;
+                    }
 
                 case "like":
                     ProcessLikeEvent(root, nickname);
@@ -141,6 +166,15 @@ public class TikFinityClient : ModSystem
                 case "chat": // Или "comment", "message" - проверьте какое событие приходит
                     ProcessChatMessage(root, nickname);
                     break;
+                case "gift": // Или "comment", "message" - проверьте какое событие приходит
+                    int coins = Main.rand.Next(1, 6); // 1–5
+                    SpawnGiftZombie(nickname, coins);
+                    break;
+                case "follow": // когда подписываются прямо во время стрима
+                    {
+                        SpawnSubscriberSlime(nickname);
+                        break;
+                    }
                 // Можно добавить другие события
                 default:
                     // Для неизвестных событий тоже спавним обычного слизня
@@ -276,6 +310,28 @@ public class TikFinityClient : ModSystem
         return nickname;
     }
 
+    private string ReplaceEmojis(string input)
+    {
+        if (string.IsNullOrEmpty(input))
+            return input
+        .Replace("😀", ":)")
+        .Replace("😂", "xD")
+        .Replace("❤️", "<3")
+        .Replace("🔥", "FIRE")
+        .Replace("👍", "+");
+
+        // Удаляем все emoji (Unicode surrogate pairs)
+        var sb = new StringBuilder();
+
+        foreach (char c in input)
+        {
+            if (!char.IsSurrogate(c))
+                sb.Append(c);
+        }
+
+        return sb.ToString();
+    }
+
     private void ProcessLikeEvent(JsonElement root, string nickname)
     {
         int likeCount = 1;
@@ -360,12 +416,16 @@ public class TikFinityClient : ModSystem
                 NPC npc = Main.npc[npcID];
 
                 var global = npc.GetGlobalNPC<ViewerFireflyGlobal>();
+                comment = ReplaceEmojis(comment);
+
                 global.viewerName = nickname;
                 global.commentText = comment;
                 global.isComment = true;
 
+                // ✅ Важный флаг: это зритель
+                global.isViewer = true;
+
                 npc.timeLeft = 600; // 10 секунд жизни
-                global.StartFadeOut(600);
             }
 
             // Также вывод в чат
@@ -379,4 +439,71 @@ public class TikFinityClient : ModSystem
                 );
         });
     }
+
+    private void SpawnGiftZombie(string nickname, int goldCoins)
+    {
+        if (Main.netMode == 1) return;
+
+        Main.QueueMainThreadAction(() =>
+        {
+            var player = Main.LocalPlayer;
+
+            int npcID = NPC.NewNPC(
+                player.GetSource_FromThis(),
+                (int)player.position.X + Main.rand.Next(-300, 300),
+                (int)player.position.Y,
+                NPCID.FlyingFish
+            );
+
+            if (npcID >= 0)
+            {
+                NPC npc = Main.npc[npcID];
+
+                var global = npc.GetGlobalNPC<GiftZombieGlobal>();
+                global.giverName = nickname;
+                global.goldInside = goldCoins; // ✅ золото теперь ВНУТРИ зомби
+
+                npc.netUpdate = true;
+            }
+        });
+    }
+
+    private void SpawnSubscriberSlime(string nickname)
+    {
+        if (Main.netMode == 1) return;
+
+        Main.QueueMainThreadAction(() =>
+        {
+            var player = Main.LocalPlayer;
+
+            int npcID = NPC.NewNPC(
+                player.GetSource_FromThis(),
+                (int)player.position.X + Main.rand.Next(-200, 200),
+                (int)player.position.Y,
+                NPCID.BlueSlime // ✅ можешь заменить на любой
+            );
+
+            if (npcID >= 0)
+            {
+                NPC npc = Main.npc[npcID];
+
+                // Делаем его полностью дружественным
+                npc.friendly = true;
+                npc.damage = 0;
+                npc.lifeMax = 50;
+                npc.life = 50;
+                npc.chaseable = false;
+
+                var global = npc.GetGlobalNPC<ViewerSlimeGlobal>();
+                global.viewerName = nickname;
+                global.isSeagull = false; // это не комментарий
+
+                npc.netUpdate = true;
+            }
+
+            // ✅ Надпись в чат
+            Main.NewText($"[Подписчик] {nickname} присоединился!", 255, 215, 100);
+        });
+    }
+
 }
