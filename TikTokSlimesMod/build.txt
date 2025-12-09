@@ -1,0 +1,3 @@
+displayName = TikTokSlimesMod
+author = Imapo
+version = 0.1
