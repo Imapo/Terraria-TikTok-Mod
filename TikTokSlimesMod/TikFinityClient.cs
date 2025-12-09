@@ -125,7 +125,7 @@ public class TikFinityClient : ModSystem
                 case "roomUser":
                 case "join":
                 case "": // Если нет поля event, считаем входом
-                    SpawnViewerSlime(nickname);
+                    SpawnViewerButterfly(nickname);
                     break;
 
                 case "like":
@@ -138,7 +138,7 @@ public class TikFinityClient : ModSystem
                 // Можно добавить другие события
                 default:
                     // Для неизвестных событий тоже спавним обычного слизня
-                    SpawnViewerSlime(nickname);
+                    SpawnViewerButterfly(nickname);
                     break;
             }
         }
@@ -271,9 +271,9 @@ public class TikFinityClient : ModSystem
     }
 
     // 📝 МЕТОД ОБРАБОТКИ ЛАЙКОВ
+    // Внутри вашего TikFinityClient
     private void ProcessLikeEvent(JsonElement root, string nickname)
     {
-        // 1. Получаем количество лайков (по умолчанию 1)
         int likeCount = 1;
 
         if (root.TryGetProperty("count", out var countProp) && countProp.ValueKind == JsonValueKind.Number)
@@ -283,40 +283,36 @@ public class TikFinityClient : ModSystem
         else if (root.TryGetProperty("data", out var dataElement) && dataElement.ValueKind == JsonValueKind.Object)
         {
             if (dataElement.TryGetProperty("count", out var dataCountProp) && dataCountProp.ValueKind == JsonValueKind.Number)
-            {
                 likeCount = dataCountProp.GetInt32();
-            }
             else if (dataElement.TryGetProperty("likeCount", out var likeCountProp) && likeCountProp.ValueKind == JsonValueKind.Number)
-            {
                 likeCount = likeCountProp.GetInt32();
-            }
         }
 
-        // 2. Обновляем счетчик
+        // Обновляем счетчик лайков
         if (!viewerLikes.ContainsKey(nickname))
             viewerLikes[nickname] = 0;
 
-        int oldCount = viewerLikes[nickname];
         viewerLikes[nickname] += likeCount;
-        int newCount = viewerLikes[nickname];
 
-        // 3. Проверяем, достигли ли мы нового порога в 10 лайков
-        int oldSpecialSlimes = oldCount / 10;
-        int newSpecialSlimes = newCount / 10;
-        int slimesToSpawn = newSpecialSlimes - oldSpecialSlimes;
-
-        // 4. Спавним красных слизней (если нужно)
-        if (slimesToSpawn > 0)
+        // Лечим игрока и отображаем ник
+        Main.QueueMainThreadAction(() =>
         {
-            for (int i = 0; i < slimesToSpawn; i++)
-            {
-                SpawnRedSlime(nickname);
-            }
-        }
+            var player = Main.LocalPlayer;
 
-        // 5. Также можно спавнить обычного розового слизня за каждый лайк
-        SpawnRedSlime(nickname);
+            // Лечение на 1 за каждый лайк
+            player.statLife += likeCount;
+            if (player.statLife > player.statLifeMax2)
+                player.statLife = player.statLifeMax2;
+
+            // Отображаем ник лайкера через CombatText
+            CombatText.NewText(
+                player.getRect(),
+                Microsoft.Xna.Framework.Color.LimeGreen,
+                nickname
+            );
+        });
     }
+
 
     private void SpawnRedSlime(string nickname)
     {
@@ -341,7 +337,7 @@ public class TikFinityClient : ModSystem
         });
     }
 
-    private void SpawnViewerSlime(string name)
+    private void SpawnViewerButterfly(string name)
     {
         if (Main.netMode == 1) return;
 
@@ -352,16 +348,17 @@ public class TikFinityClient : ModSystem
             int npcID = NPC.NewNPC(
                 player.GetSource_FromThis(),
                 (int)player.position.X + Main.rand.Next(-200, 200),
-                (int)player.position.Y - 200,
-                NPCID.BlueSlime
+                (int)player.position.Y - 100, // чуть выше игрока
+                NPCID.Butterfly   // ✅ бабочка вместо синего слизня
             );
 
             if (npcID >= 0)
             {
                 NPC npc = Main.npc[npcID];
 
-                // ✅ Сохраняем ник в GlobalNPC
-                npc.GetGlobalNPC<ViewerSlimeGlobal>().viewerName = name;
+                var global = npc.GetGlobalNPC<ViewerSlimeGlobal>();
+                global.viewerName = name;
+                global.isSeagull = false; // это не комментарий, а новый зритель
             }
         });
     }
@@ -373,22 +370,30 @@ public class TikFinityClient : ModSystem
         Main.QueueMainThreadAction(() =>
         {
             var player = Main.LocalPlayer;
+
             int npcID = NPC.NewNPC(
                 player.GetSource_FromThis(),
                 (int)player.position.X + Main.rand.Next(-300, 300),
-                (int)player.position.Y - 300,
-                NPCID.Seagull
+                (int)player.position.Y - 50,
+                NPCID.Bunny   // ✅ ЗАЯЦ ВМЕСТО ЧАЙКИ
             );
 
+            // ✅ Вывод в чат
+            string chatMessage = $"[TikTok] {nickname}: {comment}";
+            Main.NewText(chatMessage, 180, 255, 180);
+
+            // ✅ Заполнение GlobalNPC — ВАЖНО
             if (npcID >= 0)
             {
                 NPC npc = Main.npc[npcID];
-                string displayText = $"{nickname}: {comment}";
-                if (displayText.Length > 20)
-                    displayText = displayText.Substring(0, 17) + "...";
-                npc.GivenName = displayText;
+
+                var global = npc.GetGlobalNPC<ViewerSlimeGlobal>();
+                global.viewerName = nickname;
+                global.commentText = comment;
+                global.isSeagull = true; // можно потом переименовать в isCommentNPC
             }
         });
     }
+
 
 }
