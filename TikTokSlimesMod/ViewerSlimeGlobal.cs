@@ -1,6 +1,7 @@
 ﻿using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 using ReLogic.Graphics;
+using System.Xml.Linq;
 using Terraria;
 using Terraria.GameContent;
 using Terraria.ID;
@@ -14,6 +15,30 @@ public class ViewerSlimeGlobal : GlobalNPC
     public string viewerName;
     public string commentText;
     public bool isSeagull;
+    public bool fadingOut = false;
+    public int fadeTicks = 0;
+    public int fadeDuration = 0;
+
+    public void StartFadeOut(int duration)
+    {
+        fadingOut = true;
+        fadeTicks = 0;
+        fadeDuration = duration;
+    }
+
+    public override void AI(NPC npc)
+    {
+        if (fadingOut)
+        {
+            fadeTicks++;
+            float progress = fadeTicks / (float)fadeDuration;
+            npc.alpha = (int)(255 * progress); // прозрачность 0..255
+            if (fadeTicks >= fadeDuration)
+            {
+                npc.active = false;
+            }
+        }
+    }
 
     public override void PostDraw(NPC npc, SpriteBatch spriteBatch, Vector2 screenPos, Color drawColor)
     {
@@ -43,6 +68,125 @@ public class ViewerSlimeGlobal : GlobalNPC
             0f,
             Vector2.Zero,
             new Vector2(scale)
+        );
+    }
+}
+
+public class ViewerButterflyGlobal : GlobalNPC
+{
+    public override bool InstancePerEntity => true;
+
+    public int lifetime = 0; // тики жизни бабочки
+    public bool isViewerButterfly = false;
+    public string viewerName = "";
+
+    public override void AI(NPC npc)
+    {
+        if (!isViewerButterfly)
+            return;
+
+        lifetime++;
+
+        // Начинаем исчезать за последние 60 тиков (1 секунда)
+        if (lifetime > 540)
+        {
+            npc.alpha = (int)MathHelper.Clamp((lifetime - 540) * 4.25f, 0, 255); // 255 за 60 тиков
+        }
+
+        if (lifetime > 600) // 10 секунд
+        {
+            npc.active = false;
+        }
+    }
+
+    public override void PostDraw(NPC npc, SpriteBatch spriteBatch, Vector2 screenPos, Color drawColor)
+    {
+        if (!isViewerButterfly || string.IsNullOrEmpty(viewerName))
+            return;
+
+        Vector2 position = npc.Top - new Vector2(0, 20) - screenPos;
+
+        Color textColor = Color.LightPink * (1f - npc.alpha / 255f); // текст исчезает вместе с бабочкой
+
+        ChatManager.DrawColorCodedStringWithShadow(
+            spriteBatch,
+            FontAssets.MouseText.Value,
+            viewerName,
+            position,
+            textColor,
+            0f,
+            Vector2.Zero,
+            new Vector2(0.8f)
+        );
+    }
+}
+
+public class ViewerFireflyGlobal : GlobalNPC
+{
+    public override bool InstancePerEntity => true;
+
+    public string viewerName = "";
+    public string commentText = "";
+    public bool isComment = false;
+
+    public bool fadingOut = false;
+    public int fadeTicks = 0;
+    public int fadeDuration = 0;
+
+    public void StartFadeOut(int duration)
+    {
+        fadingOut = true;
+        fadeTicks = 0;
+        fadeDuration = duration;
+    }
+
+    public override void AI(NPC npc)
+    {
+        // Начало исчезновения
+        if (fadingOut)
+        {
+            fadeTicks++;
+            float progress = fadeTicks / (float)fadeDuration;
+            npc.alpha = (int)(255 * progress); // прозрачность 0..255
+            if (fadeTicks >= fadeDuration)
+            {
+                npc.active = false;
+            }
+        }
+    }
+
+    public override void PostDraw(NPC npc, SpriteBatch spriteBatch, Vector2 screenPos, Color drawColor)
+    {
+        if (string.IsNullOrEmpty(viewerName))
+            return;
+
+        Vector2 position = npc.Top - new Vector2(0, 20) - screenPos;
+
+        // Формируем текст
+        string text = viewerName;
+        if (isComment && !string.IsNullOrEmpty(commentText))
+            text = $"{viewerName}: {commentText}";
+
+        // Обрезка длинного текста
+        if (text.Length > 40)
+            text = text.Substring(0, 37) + "...";
+
+        // Цвет текста для светлячка
+        Color textColor = Color.Orange;
+
+        // Прозрачность при fade
+        if (fadingOut)
+            textColor *= 1f - npc.alpha / 255f;
+
+        ChatManager.DrawColorCodedStringWithShadow(
+            spriteBatch,
+            FontAssets.MouseText.Value,
+            text,
+            position,
+            textColor,
+            0f,
+            Vector2.Zero,
+            new Vector2(0.8f)
         );
     }
 }

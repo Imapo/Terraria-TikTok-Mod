@@ -1,5 +1,7 @@
-﻿using System;
+﻿using Microsoft.Xna.Framework;
+using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
@@ -14,6 +16,8 @@ public class TikFinityClient : ModSystem
     private static ClientWebSocket socket;
     private static CancellationTokenSource cancelToken;
     private static Dictionary<string, int> viewerLikes = new Dictionary<string, int>();
+    // ✅ Множество уже спавненных зрителей
+    public static HashSet<string> spawnedViewers = new HashSet<string>();
 
     public override void OnWorldLoad()
     {
@@ -23,6 +27,8 @@ public class TikFinityClient : ModSystem
     public override void OnWorldUnload()
     {
         StopClient();
+        // ✅ Очищаем список спавненных зрителей при выгрузке мира
+        spawnedViewers.Clear();
     }
 
     private async void StartClient()
@@ -162,7 +168,7 @@ public class TikFinityClient : ModSystem
             return;
 
         // 2. Спавним чайку с комментарием
-        SpawnSeagullWithComment(nickname, commentText);
+        SpawnCommentFirefly(nickname, commentText);
     }
 
     // 📝 ИЗВЛЕЧЕНИЕ ТЕКСТА КОММЕНТАРИЯ
@@ -270,76 +276,47 @@ public class TikFinityClient : ModSystem
         return nickname;
     }
 
-    // 📝 МЕТОД ОБРАБОТКИ ЛАЙКОВ
-    // Внутри вашего TikFinityClient
     private void ProcessLikeEvent(JsonElement root, string nickname)
     {
         int likeCount = 1;
 
         if (root.TryGetProperty("count", out var countProp) && countProp.ValueKind == JsonValueKind.Number)
-        {
             likeCount = countProp.GetInt32();
-        }
-        else if (root.TryGetProperty("data", out var dataElement) && dataElement.ValueKind == JsonValueKind.Object)
+
+        string nickCopy = nickname; // для замыкания
+
+        for (int i = 0; i < likeCount; i++)
         {
-            if (dataElement.TryGetProperty("count", out var dataCountProp) && dataCountProp.ValueKind == JsonValueKind.Number)
-                likeCount = dataCountProp.GetInt32();
-            else if (dataElement.TryGetProperty("likeCount", out var likeCountProp) && likeCountProp.ValueKind == JsonValueKind.Number)
-                likeCount = likeCountProp.GetInt32();
-        }
-
-        // Обновляем счетчик лайков
-        if (!viewerLikes.ContainsKey(nickname))
-            viewerLikes[nickname] = 0;
-
-        viewerLikes[nickname] += likeCount;
-
-        // Лечим игрока и отображаем ник
-        Main.QueueMainThreadAction(() =>
-        {
-            var player = Main.LocalPlayer;
-
-            // Лечение на 1 за каждый лайк
-            player.statLife += likeCount;
-            if (player.statLife > player.statLifeMax2)
-                player.statLife = player.statLifeMax2;
-
-            // Отображаем ник лайкера через CombatText
-            CombatText.NewText(
-                player.getRect(),
-                Microsoft.Xna.Framework.Color.LimeGreen,
-                nickname
-            );
-        });
-    }
-
-
-    private void SpawnRedSlime(string nickname)
-    {
-        if (Main.netMode == 1) return;
-
-        Main.QueueMainThreadAction(() =>
-        {
-            var player = Main.LocalPlayer;
-
-            int npcID = NPC.NewNPC(
-                player.GetSource_FromThis(),
-                (int)player.position.X + Main.rand.Next(-200, 200),
-                (int)player.position.Y - 200,
-                NPCID.RedSlime
-            );
-
-            if (npcID >= 0)
+            Main.QueueMainThreadAction(() =>
             {
-                NPC npc = Main.npc[npcID];
-                npc.GetGlobalNPC<ViewerSlimeGlobal>().viewerName = nickname;
-            }
-        });
-    }
+                var player = Main.LocalPlayer;
 
+                // Лечим игрока на 1 здоровье
+                player.statLife += 1;
+                if (player.statLife > player.statLifeMax2)
+                    player.statLife = player.statLifeMax2;
+
+                player.HealEffect(1);
+
+                // Выводим ник лайкера через CombatText на увеличенное время (60 = стандарт, можно больше)
+                int index = CombatText.NewText(player.getRect(), Color.LightPink, nickname);
+                if (index >= 0 && index < Main.combatText.Length)
+                {
+                    Main.combatText[index].lifeTime = 120; // длительность в тиках (~2 секунды)
+                }
+
+            });
+        }
+    }
     private void SpawnViewerButterfly(string name)
     {
         if (Main.netMode == 1) return;
+
+        // Проверяем уникальность: спавним только если такой ник ещё нет
+        if (Main.npc.Any(n => n.active && n.type == NPCID.Butterfly &&
+                              n.GetGlobalNPC<ViewerButterflyGlobal>().isViewerButterfly &&
+                              n.GetGlobalNPC<ViewerButterflyGlobal>().viewerName == name))
+            return;
 
         Main.QueueMainThreadAction(() =>
         {
@@ -349,21 +326,21 @@ public class TikFinityClient : ModSystem
                 player.GetSource_FromThis(),
                 (int)player.position.X + Main.rand.Next(-200, 200),
                 (int)player.position.Y - 100, // чуть выше игрока
-                NPCID.Butterfly   // ✅ бабочка вместо синего слизня
+                NPCID.Butterfly
             );
 
             if (npcID >= 0)
             {
                 NPC npc = Main.npc[npcID];
-
-                var global = npc.GetGlobalNPC<ViewerSlimeGlobal>();
+                var global = npc.GetGlobalNPC<ViewerButterflyGlobal>();
+                global.isViewerButterfly = true;
                 global.viewerName = name;
-                global.isSeagull = false; // это не комментарий, а новый зритель
+                global.lifetime = 0;
             }
         });
     }
 
-    private void SpawnSeagullWithComment(string nickname, string comment)
+    private void SpawnCommentFirefly(string nickname, string comment)
     {
         if (Main.netMode == 1) return;
 
@@ -374,26 +351,32 @@ public class TikFinityClient : ModSystem
             int npcID = NPC.NewNPC(
                 player.GetSource_FromThis(),
                 (int)player.position.X + Main.rand.Next(-300, 300),
-                (int)player.position.Y - 50,
-                NPCID.Bunny   // ✅ ЗАЯЦ ВМЕСТО ЧАЙКИ
+                (int)player.position.Y - 100,
+                NPCID.Firefly
             );
 
-            // ✅ Вывод в чат
-            string chatMessage = $"[TikTok] {nickname}: {comment}";
-            Main.NewText(chatMessage, 180, 255, 180);
-
-            // ✅ Заполнение GlobalNPC — ВАЖНО
             if (npcID >= 0)
             {
                 NPC npc = Main.npc[npcID];
 
-                var global = npc.GetGlobalNPC<ViewerSlimeGlobal>();
+                var global = npc.GetGlobalNPC<ViewerFireflyGlobal>();
                 global.viewerName = nickname;
                 global.commentText = comment;
-                global.isSeagull = true; // можно потом переименовать в isCommentNPC
+                global.isComment = true;
+
+                npc.timeLeft = 600; // 10 секунд жизни
+                global.StartFadeOut(600);
             }
+
+            // Также вывод в чат
+            string chatMessage = $"[TikTok] {nickname}: {comment}";
+            if (Main.netMode == NetmodeID.SinglePlayer)
+                Main.NewText(chatMessage, 180, 255, 180);
+            else if (Main.netMode == NetmodeID.Server)
+                Terraria.Chat.ChatHelper.BroadcastChatMessage(
+                    Terraria.Localization.NetworkText.FromLiteral(chatMessage),
+                    new Color(180, 255, 180)
+                );
         });
     }
-
-
 }
