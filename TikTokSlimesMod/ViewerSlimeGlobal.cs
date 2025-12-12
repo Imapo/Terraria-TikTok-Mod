@@ -1,15 +1,13 @@
 ﻿using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
-using ReLogic.Content;
 using ReLogic.Graphics;
-using System;
 using Terraria;
 using Terraria.GameContent;
 using Terraria.ID;
 using Terraria.ModLoader;
-using Terraria.UI.Chat;
 using System.Text;
-using System.Globalization;
+using System.Collections.Generic;
+using System.Linq;
 
 public static class TikFont
 {
@@ -135,7 +133,7 @@ public class ViewerSlimeGlobal : GlobalNPC
         }
 
         // Плавное движение
-        npc.velocity = (npc.velocity * 20f + move) / 21f;
+        //npc.velocity = (npc.velocity * 20f + move) / 21f;
 
         // Можно добавить урон при контакте
         if (target != null && npc.Hitbox.Intersects(target.Hitbox))
@@ -199,6 +197,8 @@ public class ViewerButterflyGlobal : GlobalNPC
     public int lifetime = 0;
     public bool isViewerButterfly = false;
     public string viewerName = "";
+    public string rawId = "";
+    public static List<TikFinityClient.SubscriberHistoryEntry> SubscriberHistory = new List<TikFinityClient.SubscriberHistoryEntry>();
 
     public override void AI(NPC npc)
     {
@@ -217,14 +217,34 @@ public class ViewerButterflyGlobal : GlobalNPC
     {
         if (!isViewerButterfly || string.IsNullOrEmpty(viewerName)) return;
 
+        // Позиция над NPC
         Vector2 position = npc.Top - new Vector2(0, 20) - screenPos;
-        Color textColor = Color.LightPink * (1f - npc.alpha / 255f);
 
+        bool isSubscriber = SubscriberHistory.Any(e => e.Key == rawId);
+
+        Color nameColor;
+
+        if (isSubscriber)
+        {
+            // Радужный цвет для подписчиков
+            float hue = (Main.GameUpdateCount % 360) / 360f;
+            nameColor = Main.hslToRgb(hue, 1f, 0.5f);
+        }
+        else
+        {
+            // Обычный цвет для всех остальных
+            nameColor = Color.LightPink;
+        }
+
+        // Учитываем прозрачность NPC
+        nameColor *= (1f - npc.alpha / 255f);
+
+        // Рисуем ник
         spriteBatch.DrawString(
             TikFont.Font,
             viewerName,
             position,
-            textColor,
+            nameColor,
             0f,
             Vector2.Zero,
             0.8f,
@@ -353,9 +373,6 @@ public static class NickSanitizer
 {
     public static string Sanitize(string input)
     {
-        if (string.IsNullOrWhiteSpace(input))
-            return "Viewer";
-
         var sb = new StringBuilder();
 
         foreach (char c in input)

@@ -1,4 +1,5 @@
-﻿using Microsoft.Xna.Framework;
+﻿// TikFinityClient.cs
+using Microsoft.Xna.Framework;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -10,22 +11,160 @@ using System.Threading.Tasks;
 using Terraria;
 using Terraria.ID;
 using Terraria.ModLoader;
+using Terraria.ModLoader.IO;
+using System.IO;
 
 public class TikFinityClient : ModSystem
 {
+    private static readonly string ViewerDatabaseFilePath = Path.Combine(Main.SavePath, "TikFinity_ViewerDatabase.json");
+    private static readonly string SubscriberHistoryFilePath = Path.Combine(Main.SavePath, "TikFinity_SubscriberHistory.json");
+
+    private static List<SubscriberHistoryEntry> subscriberHistory = new List<SubscriberHistoryEntry>();
     private static ClientWebSocket socket;
     private static CancellationTokenSource cancelToken;
-    private static Dictionary<string, int> viewerLikes = new Dictionary<string, int>();
-    public static HashSet<string> spawnedViewers = new HashSet<string>();
 
+    private static Dictionary<string, ViewerInfo> viewerDatabase = new Dictionary<string, ViewerInfo>();
+    private static HashSet<string> veteranSpawnedThisSession = new HashSet<string>();
+
+    public class SubscriberHistoryEntry
+    {
+        public string Key { get; set; }
+        public string Nickname { get; set; }
+        public DateTime Timestamp { get; set; }
+        public string EventType { get; set; } // subscribe, member, etc.
+    }
+
+    public static void UpdateSubscriberHistoryJson(SubscriberHistoryEntry entry)
+    {
+        try
+        {
+            subscriberHistory.Add(entry);
+            var options = new JsonSerializerOptions { WriteIndented = true };
+            string json = JsonSerializer.Serialize(subscriberHistory, options);
+            File.WriteAllText(SubscriberHistoryFilePath, json);
+        }
+        catch (Exception ex)
+        {
+            ModContent.GetInstance<global::TikTokSlimesMod.TikTokSlimesMod>()
+                .Logger.Info($"[Tikfinity ERROR] Failed to update subscriber history JSON: {ex}");
+        }
+    }
+
+    public static void ImportSubscriberHistory()
+    {
+        try
+        {
+            if (!File.Exists(SubscriberHistoryFilePath)) return;
+            string json = File.ReadAllText(SubscriberHistoryFilePath);
+            var list = JsonSerializer.Deserialize<List<SubscriberHistoryEntry>>(json);
+            if (list != null) subscriberHistory = list;
+        }
+        catch (Exception ex)
+        {
+            ModContent.GetInstance<global::TikTokSlimesMod.TikTokSlimesMod>()
+                .Logger.Info($"[Tikfinity ERROR] Failed to import subscriber history: {ex}");
+        }
+    }
+
+    public class ViewerInfo
+    {
+        public string Key { get; set; }
+        public string Nickname { get; set; }
+        public bool IsSubscriber { get; set; }
+        public bool IsModerator { get; set; }
+        public bool IsFollowing { get; set; }
+
+        // Новое поле для логирования источника события
+        public string SourceEvent { get; set; }
+    }
+
+    // -------------------------
+    // Сохранение / загрузка базы
+    // -------------------------
+
+    public static void ExportViewerDatabase()
+    {
+        try
+        {
+            var list = viewerDatabase.Values.ToList();
+
+            var options = new JsonSerializerOptions
+            {
+                WriteIndented = true
+            };
+
+            string json = JsonSerializer.Serialize(list, options);
+
+            File.WriteAllText(ViewerDatabaseFilePath, json);
+            ModContent.GetInstance<global::TikTokSlimesMod.TikTokSlimesMod>().Logger.Info($"[Tikfinity] Viewer database exported to {ViewerDatabaseFilePath}");
+        }
+        catch (Exception ex)
+        {
+            ModContent.GetInstance<global::TikTokSlimesMod.TikTokSlimesMod>().Logger.Info($"[Tikfinity ERROR] Failed to export viewer database: {ex}");
+        }
+    }
+
+    // -------------------------
+    // Импорт viewerDatabase из JSON
+    // -------------------------
+    public static void ImportViewerDatabase()
+    {
+        try
+        {
+            if (!File.Exists(ViewerDatabaseFilePath))
+                return;
+
+            string json = File.ReadAllText(ViewerDatabaseFilePath);
+            var list = JsonSerializer.Deserialize<List<ViewerInfo>>(json);
+
+            if (list != null)
+            {
+                viewerDatabase.Clear();
+                foreach (var v in list)
+                {
+                    if (!string.IsNullOrEmpty(v.Key))
+                        viewerDatabase[v.Key] = v;
+                }
+
+                ModContent.GetInstance<global::TikTokSlimesMod.TikTokSlimesMod>().Logger.Info($"[Tikfinity] Viewer database imported from {ViewerDatabaseFilePath}");
+            }
+        }
+        catch (Exception ex)
+        {
+            ModContent.GetInstance<global::TikTokSlimesMod.TikTokSlimesMod>().Logger.Info($"[Tikfinity ERROR] Failed to import viewer database: {ex}");
+        }
+    }
+
+    public static void UpdateViewerDatabaseJson()
+    {
+        try
+        {
+            var list = viewerDatabase.Values.ToList();
+            var options = new JsonSerializerOptions { WriteIndented = true };
+            string json = JsonSerializer.Serialize(list, options);
+            File.WriteAllText(ViewerDatabaseFilePath, json);
+        }
+        catch (Exception ex)
+        {
+            ModContent.GetInstance<global::TikTokSlimesMod.TikTokSlimesMod>()
+                .Logger.Info($"[Tikfinity ERROR] Failed to update viewer JSON: {ex}");
+        }
+    }
+
+    // -------------------------
+    // Жизненный цикл ModSystem
+    // -------------------------
     public override void OnWorldLoad()
     {
+        ImportViewerDatabase();
         StartClient();
     }
 
     public override void OnWorldUnload()
     {
         StopClient();
+        UpdateViewerDatabaseJson();
+        veteranSpawnedThisSession.Clear();
     }
 
     private async void StartClient()
@@ -63,35 +202,171 @@ public class TikFinityClient : ModSystem
         var buffer = new byte[4096];
         var messageBuilder = new StringBuilder();
 
-        while (socket.State == WebSocketState.Open)
+        while (socket != null && socket.State == WebSocketState.Open)
         {
             WebSocketReceiveResult result;
 
-            do
+            try
             {
-                result = await socket.ReceiveAsync(
-                    new ArraySegment<byte>(buffer),
-                    cancelToken.Token
-                );
-
-                if (result.MessageType == WebSocketMessageType.Close)
+                do
                 {
-                    await socket.CloseAsync(
-                        WebSocketCloseStatus.NormalClosure,
-                        "Closed",
-                        CancellationToken.None
+                    result = await socket.ReceiveAsync(
+                        new ArraySegment<byte>(buffer),
+                        cancelToken.Token
                     );
-                    return;
-                }
 
-                messageBuilder.Append(Encoding.UTF8.GetString(buffer, 0, result.Count));
+                    if (result.MessageType == WebSocketMessageType.Close)
+                    {
+                        await socket.CloseAsync(
+                            WebSocketCloseStatus.NormalClosure,
+                            "Closed",
+                            CancellationToken.None
+                        );
+                        return;
+                    }
 
-            } while (!result.EndOfMessage);
+                    messageBuilder.Append(Encoding.UTF8.GetString(buffer, 0, result.Count));
+                } while (!result.EndOfMessage);
+            }
+            catch { return; }
 
             string fullMessage = messageBuilder.ToString();
             messageBuilder.Clear();
 
             HandleMessage(fullMessage);
+        }
+    }
+
+    // -------------------------
+    // Вспомогательные экстракторы
+    // -------------------------
+    private string ExtractNickname(JsonElement root)
+    {
+        string nickname = "";
+
+        if (root.TryGetProperty("nickname", out var nickProp) && !string.IsNullOrWhiteSpace(nickProp.GetString()))
+        {
+            nickname = nickProp.GetString().Trim();
+        }
+        else if (root.TryGetProperty("uniqueId", out var idProp) && !string.IsNullOrWhiteSpace(idProp.GetString()))
+        {
+            nickname = idProp.GetString().Trim();
+            if (nickname.StartsWith("@")) nickname = nickname.Substring(1);
+        }
+        else if (root.TryGetProperty("data", out var dataProp) && dataProp.ValueKind == JsonValueKind.Object)
+        {
+            if (dataProp.TryGetProperty("nickname", out var dataNickProp) && !string.IsNullOrWhiteSpace(dataNickProp.GetString()))
+                nickname = dataNickProp.GetString().Trim();
+            else if (dataProp.TryGetProperty("uniqueId", out var dataIdProp) && !string.IsNullOrWhiteSpace(dataIdProp.GetString()))
+            {
+                nickname = dataIdProp.GetString().Trim();
+                if (nickname.StartsWith("@")) nickname = nickname.Substring(1);
+            }
+            else if (dataProp.TryGetProperty("user", out var userProp) && userProp.ValueKind == JsonValueKind.Object)
+            {
+                if (userProp.TryGetProperty("nickname", out var userNickProp) && !string.IsNullOrWhiteSpace(userNickProp.GetString()))
+                    nickname = userNickProp.GetString().Trim();
+                else if (userProp.TryGetProperty("uniqueId", out var userIdProp) && !string.IsNullOrWhiteSpace(userIdProp.GetString()))
+                {
+                    nickname = userIdProp.GetString().Trim();
+                    if (nickname.StartsWith("@")) nickname = nickname.Substring(1);
+                }
+            }
+        }
+        else if (root.TryGetProperty("user", out var userElement) && userElement.ValueKind == JsonValueKind.Object)
+        {
+            if (userElement.TryGetProperty("nickname", out var userNickProp) && !string.IsNullOrWhiteSpace(userNickProp.GetString()))
+                nickname = userNickProp.GetString().Trim();
+            else if (userElement.TryGetProperty("uniqueId", out var userIdProp) && !string.IsNullOrWhiteSpace(userIdProp.GetString()))
+            {
+                nickname = userIdProp.GetString().Trim();
+                if (nickname.StartsWith("@")) nickname = nickname.Substring(1);
+            }
+        }
+
+        if (!string.IsNullOrEmpty(nickname) && nickname.Length > 20)
+            nickname = nickname.Substring(0, 17) + "...";
+
+        return nickname;
+    }
+
+    // Возвращает стабильный ключ: сначала uniqueId (если есть), иначе nickname
+    private string ExtractViewerKey(JsonElement root)
+    {
+        // Ищем uniqueId в корне, в data, в user
+        if (root.TryGetProperty("uniqueId", out var idProp) && !string.IsNullOrWhiteSpace(idProp.GetString()))
+            return idProp.GetString().Trim();
+
+        if (root.TryGetProperty("data", out var dataProp) && dataProp.ValueKind == JsonValueKind.Object)
+        {
+            if (dataProp.TryGetProperty("uniqueId", out var dataIdProp) && !string.IsNullOrWhiteSpace(dataIdProp.GetString()))
+                return dataIdProp.GetString().Trim();
+
+            if (dataProp.TryGetProperty("user", out var userProp) && userProp.ValueKind == JsonValueKind.Object)
+            {
+                if (userProp.TryGetProperty("uniqueId", out var userIdProp) && !string.IsNullOrWhiteSpace(userIdProp.GetString()))
+                    return userIdProp.GetString().Trim();
+            }
+        }
+
+        if (root.TryGetProperty("user", out var userElement) && userElement.ValueKind == JsonValueKind.Object)
+        {
+            if (userElement.TryGetProperty("uniqueId", out var userIdProp) && !string.IsNullOrWhiteSpace(userIdProp.GetString()))
+                return userIdProp.GetString().Trim();
+        }
+
+        // Фолбэк — используем nickname (не идеально, но лучше чем ничего)
+        string nick = ExtractNickname(root);
+        return string.IsNullOrEmpty(nick) ? Guid.NewGuid().ToString() : nick;
+    }
+
+    // Извлекает флаги из структуры message (учитывает разные форматы)
+    private void ExtractUserFlags(JsonElement root, out bool isSubscriber, out bool isModerator, out bool isFollowing)
+    {
+        isSubscriber = false;
+        isModerator = false;
+        isFollowing = false;
+
+        // Попытка стандартных путей
+        if (root.TryGetProperty("isSubscribed", out var s1) && s1.ValueKind == JsonValueKind.True)
+            isSubscriber = true;
+
+        if (root.TryGetProperty("isFollower", out var f1) && f1.ValueKind == JsonValueKind.True)
+            isFollowing = true;
+
+        // Вложённый user или data.user
+        JsonElement userEl = default;
+        bool hasUser = false;
+
+        if (root.TryGetProperty("user", out userEl) && userEl.ValueKind == JsonValueKind.Object)
+            hasUser = true;
+        else if (root.TryGetProperty("data", out var dataProp) && dataProp.ValueKind == JsonValueKind.Object)
+        {
+            if (dataProp.TryGetProperty("user", out userEl) && userEl.ValueKind == JsonValueKind.Object)
+                hasUser = true;
+        }
+
+        if (hasUser)
+        {
+            if (userEl.TryGetProperty("isSubscriber", out var s2) && s2.ValueKind == JsonValueKind.True)
+                isSubscriber = true;
+            if (userEl.TryGetProperty("isModerator", out var m2) && m2.ValueKind == JsonValueKind.True)
+                isModerator = true;
+            if (userEl.TryGetProperty("isFollowing", out var f2) && f2.ValueKind == JsonValueKind.True)
+                isFollowing = true;
+
+            // Иногда флаги лежат в data.user.roles или followRole — игнорируем unreliable followRole
+        }
+
+        // Иногда есть в data напрямую
+        if (root.TryGetProperty("data", out var d) && d.ValueKind == JsonValueKind.Object)
+        {
+            if (d.TryGetProperty("isSubscriber", out var ds) && ds.ValueKind == JsonValueKind.True)
+                isSubscriber = true;
+            if (d.TryGetProperty("isModerator", out var dm) && dm.ValueKind == JsonValueKind.True)
+                isModerator = true;
+            if (d.TryGetProperty("isFollowing", out var df) && df.ValueKind == JsonValueKind.True)
+                isFollowing = true;
         }
     }
 
@@ -112,87 +387,54 @@ public class TikFinityClient : ModSystem
         return false;
     }
 
-
+    // -------------------------
+    // Основной обработчик сообщений
+    // -------------------------
     private void HandleMessage(string json)
     {
         try
         {
-            json = json.Trim();
-            if (!json.StartsWith("{") || !json.EndsWith("}"))
-                return;
-
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
 
-            // 1. Сначала извлекаем никнейм ЕДИНЫМ методом
-            string nickname = ExtractNickname(root);
+            string eventType = root.TryGetProperty("event", out var ev) ? ev.GetString() : "";
+            JsonElement data = root.TryGetProperty("data", out var d) ? d : root;
 
-            // Если не удалось извлечь ник - выходим
-            if (string.IsNullOrEmpty(nickname))
-                return;
+            string key = ExtractViewerKey(data);
+            string nickname = ExtractNickname(data);
 
-            // 2. Определяем тип события
-            string eventType = "";
-            if (root.TryGetProperty("event", out var eventProp))
-            {
-                eventType = eventProp.GetString();
-            }
+            ExtractUserFlags(data, out bool isSubscriber, out bool isModerator, out bool isFollowing);
 
-            // 3. Обработка по типу события
             switch (eventType)
             {
-                case "member":
-                case "roomUser":
                 case "join":
+                case "roomUser":
+                case "member":
                 case "":
-                    {
-                        bool isFollower = IsFollower(root);
+                    HandleJoinEvent(key, nickname);
+                    break;
 
-                        // Новая проверка именно на **подписанного зрителя**
-                        bool isAlreadySubscribed =
-                            root.TryGetProperty("isSubscribed", out var subscribedProp) &&
-                            subscribedProp.ValueKind == JsonValueKind.True;
-
-                        if (isFollower)
-                        {
-                            if (isAlreadySubscribed)
-                            {
-                                // ⚡ Здесь это зритель, который **подписан**
-                                SpawnVeteranSlime(nickname);
-                            }
-                            else
-                            {
-                                // ⚡ Это новая подписка
-                                SpawnSubscriberSlime(nickname);
-                            }
-                        }
-                        else
-                        {
-                            SpawnViewerButterfly(nickname);
-                        }
-                        break;
-                    }
+                case "chat":
+                    HandleChatEvent(key, nickname, isSubscriber, isModerator, isFollowing, data);
+                    break;
 
                 case "like":
-                    ProcessLikeEvent(root, nickname);
+                    ProcessLikeEvent(data, nickname);
                     break;
 
-                case "chat": // Или "comment", "message" - проверьте какое событие приходит
-                    ProcessChatMessage(root, nickname);
+                case "gift":
+                    int amount = data.TryGetProperty("coins", out var c) ? c.GetInt32() : 1;
+                    SpawnGiftFlyingFish(nickname, amount);
                     break;
-                case "gift": // Или "comment", "message" - проверьте какое событие приходит
-                    int coins = Main.rand.Next(1, 6); // 1–5
-                    SpawnGiftFlyingFish(nickname, coins);
+
+                case "follow":
+                    HandleSubscribeEvent(key, nickname, isModerator, isFollowing);
                     break;
-                case "follow": // когда подписываются прямо во время стрима
-                    {
-                        SpawnSubscriberSlime(nickname);
-                        break;
-                    }
-                // Можно добавить другие события
+
                 default:
-                    // Для неизвестных событий тоже спавним обычного слизня
-                    SpawnViewerButterfly(nickname);
+                    // Если неизвестное событие, всё равно обновляем базу, но SourceEvent = eventType или "Unknown"
+                    HandleJoinEvent(key, nickname);
+                    AddOrUpdateViewer(key, nickname, isSubscriber, isModerator, isFollowing, eventType ?? "Unknown");
                     break;
             }
         }
@@ -206,7 +448,103 @@ public class TikFinityClient : ModSystem
         }
     }
 
-    // 📝 МЕТОД ОБРАБОТКИ КОММЕНТАРИЯ
+    private void AddOrUpdateViewer(string key, string nickname, bool isSubscriber, bool isModerator, bool isFollowing, string sourceEvent)
+    {
+        if (viewerDatabase.TryGetValue(key, out var existing))
+        {
+            // Обновляем только состояние и ник
+            existing.Nickname = nickname;
+            existing.IsSubscriber = isSubscriber;
+            existing.IsModerator = isModerator;
+            existing.IsFollowing = isFollowing;
+            // SourceEvent меняем только если пришло новое событие
+            if (!string.IsNullOrEmpty(sourceEvent))
+                existing.SourceEvent = sourceEvent;
+        }
+        else
+        {
+            var viewer = new ViewerInfo
+            {
+                Key = key,
+                Nickname = nickname,
+                IsSubscriber = isSubscriber,
+                IsModerator = isModerator,
+                IsFollowing = isFollowing,
+                SourceEvent = sourceEvent
+            };
+            viewerDatabase[key] = viewer;
+        }
+
+        UpdateViewerDatabaseJson();
+    }
+
+    private void HandleChatEvent(string key, string nickname, bool isSubscriber, bool isModerator, bool isFollowing, JsonElement data)
+    {
+        AddOrUpdateViewer(key, nickname, isSubscriber, isModerator, isFollowing, "ChatMessage");
+
+        if (isSubscriber)
+        {
+            if (!veteranSpawnedThisSession.Contains(key))
+            {
+                SpawnVeteranSlime(nickname); // VIP-слайм
+                veteranSpawnedThisSession.Add(key);
+            }
+        }
+
+        if (!string.IsNullOrEmpty(nickname))
+        {
+            SpawnViewerButterfly(nickname, key);
+        }
+        ProcessChatMessage(data, nickname);
+    }
+
+    private void HandleSubscribeEvent(string key, string nickname, bool isModerator, bool isFollowing)
+    {
+        AddOrUpdateViewer(key, nickname, true, isModerator, isFollowing, "Subscribe");
+
+        SpawnSubscriberSlime(nickname);
+
+        // --- записываем в историю ---
+        var entry = new SubscriberHistoryEntry
+        {
+            Key = key,
+            Nickname = nickname,
+            Timestamp = DateTime.UtcNow,
+            EventType = "subscribe"
+        };
+        UpdateSubscriberHistoryJson(entry);
+    }
+
+    private void HandleJoinEvent(string key, string nickname)
+    {
+        if (!string.IsNullOrEmpty(nickname))
+        {
+            SpawnViewerButterfly(nickname, key);
+        }
+    }
+
+    private void RemoveViewerFromWorld(string key)
+    {
+        string nickname = viewerDatabase[key].Nickname;
+
+        Main.QueueMainThreadAction(() =>
+        {
+            foreach (var npc in Main.npc)
+            {
+                if (!npc.active) continue;
+
+                var global = npc.GetGlobalNPC<ViewerSlimeGlobal>();
+                if (global != null && global.isViewer && global.viewerName == nickname)
+                {
+                    npc.active = false;
+                }
+            }
+        });
+    }
+
+    // -------------------------
+    // Обработка чата (оставляем как было, можно расширить)
+    // -------------------------
     private void ProcessChatMessage(JsonElement root, string nickname)
     {
         // 1. Извлекаем текст комментария
@@ -219,12 +557,10 @@ public class TikFinityClient : ModSystem
         SpawnCommentFirefly(nickname, commentText);
     }
 
-    // 📝 ИЗВЛЕЧЕНИЕ ТЕКСТА КОММЕНТАРИЯ
     private string ExtractCommentText(JsonElement root)
     {
         string text = "";
 
-        // 1. Прямое поле в корне
         if (root.TryGetProperty("text", out var textProp) && !string.IsNullOrWhiteSpace(textProp.GetString()))
         {
             text = textProp.GetString().Trim();
@@ -233,97 +569,25 @@ public class TikFinityClient : ModSystem
         {
             text = commentProp.GetString().Trim();
         }
-        // 2. В data
         else if (root.TryGetProperty("data", out var dataProp) && dataProp.ValueKind == JsonValueKind.Object)
         {
             if (dataProp.TryGetProperty("text", out var dataTextProp) && !string.IsNullOrWhiteSpace(dataTextProp.GetString()))
-            {
                 text = dataTextProp.GetString().Trim();
-            }
             else if (dataProp.TryGetProperty("comment", out var dataCommentProp) && !string.IsNullOrWhiteSpace(dataCommentProp.GetString()))
-            {
                 text = dataCommentProp.GetString().Trim();
-            }
             else if (dataProp.TryGetProperty("content", out var contentProp) && !string.IsNullOrWhiteSpace(contentProp.GetString()))
-            {
                 text = contentProp.GetString().Trim();
-            }
         }
 
-        // Ограничиваем длину (чайке много не унести)
         if (text.Length > 50)
             text = text.Substring(0, 47) + "...";
 
         return text;
     }
 
-    // 📝 МЕТОД ИЗВЛЕЧЕНИЯ НИКНЕЙМА (универсальный)
-    private string ExtractNickname(JsonElement root)
-    {
-        string nickname = "";
-
-        // 1. Прямые поля в корне
-        if (root.TryGetProperty("nickname", out var nickProp) && !string.IsNullOrWhiteSpace(nickProp.GetString()))
-        {
-            nickname = nickProp.GetString().Trim();
-        }
-        else if (root.TryGetProperty("uniqueId", out var idProp) && !string.IsNullOrWhiteSpace(idProp.GetString()))
-        {
-            nickname = idProp.GetString().Trim();
-            if (nickname.StartsWith("@")) nickname = nickname.Substring(1);
-        }
-
-        // 2. Вложенный объект data
-        if (string.IsNullOrEmpty(nickname) &&
-            root.TryGetProperty("data", out var dataElement) && dataElement.ValueKind == JsonValueKind.Object)
-        {
-            // Прямо в data
-            if (dataElement.TryGetProperty("nickname", out var dataNickProp) && !string.IsNullOrWhiteSpace(dataNickProp.GetString()))
-            {
-                nickname = dataNickProp.GetString().Trim();
-            }
-            else if (dataElement.TryGetProperty("uniqueId", out var dataIdProp) && !string.IsNullOrWhiteSpace(dataIdProp.GetString()))
-            {
-                nickname = dataIdProp.GetString().Trim();
-                if (nickname.StartsWith("@")) nickname = nickname.Substring(1);
-            }
-            // data.user
-            else if (dataElement.TryGetProperty("user", out var dataUserProp) && dataUserProp.ValueKind == JsonValueKind.Object)
-            {
-                if (dataUserProp.TryGetProperty("nickname", out var userNickProp) && !string.IsNullOrWhiteSpace(userNickProp.GetString()))
-                {
-                    nickname = userNickProp.GetString().Trim();
-                }
-                else if (dataUserProp.TryGetProperty("uniqueId", out var userIdProp) && !string.IsNullOrWhiteSpace(userIdProp.GetString()))
-                {
-                    nickname = userIdProp.GetString().Trim();
-                    if (nickname.StartsWith("@")) nickname = nickname.Substring(1);
-                }
-            }
-        }
-
-        // 3. Вложенный объект user (в корне)
-        if (string.IsNullOrEmpty(nickname) &&
-            root.TryGetProperty("user", out var userElement) && userElement.ValueKind == JsonValueKind.Object)
-        {
-            if (userElement.TryGetProperty("nickname", out var userNickProp) && !string.IsNullOrWhiteSpace(userNickProp.GetString()))
-            {
-                nickname = userNickProp.GetString().Trim();
-            }
-            else if (userElement.TryGetProperty("uniqueId", out var userIdProp) && !string.IsNullOrWhiteSpace(userIdProp.GetString()))
-            {
-                nickname = userIdProp.GetString().Trim();
-                if (nickname.StartsWith("@")) nickname = nickname.Substring(1);
-            }
-        }
-
-        // 4. Ограничиваем длину
-        if (!string.IsNullOrEmpty(nickname) && nickname.Length > 20)
-            nickname = nickname.Substring(0, 17) + "...";
-
-        return nickname;
-    }
-
+    // -------------------------
+    // Остальные вспомогательные методы / спавн (твои существующие)
+    // -------------------------
     private string ReplaceEmojis(string input)
     {
         if (string.IsNullOrEmpty(input))
@@ -344,41 +608,53 @@ public class TikFinityClient : ModSystem
         if (root.TryGetProperty("count", out var countProp) && countProp.ValueKind == JsonValueKind.Number)
             likeCount = countProp.GetInt32();
 
-        string nickCopy = nickname; // для замыкания
-
         for (int i = 0; i < likeCount; i++)
         {
             Main.QueueMainThreadAction(() =>
             {
                 var player = Main.LocalPlayer;
 
-                // Лечим игрока на 1 здоровье
                 player.statLife += 1;
                 if (player.statLife > player.statLifeMax2)
                     player.statLife = player.statLifeMax2;
 
                 player.HealEffect(1);
 
-                // Выводим ник лайкера через CombatText на увеличенное время (60 = стандарт, можно больше)
                 int index = CombatText.NewText(player.getRect(), Color.LightPink, nickname);
                 if (index >= 0 && index < Main.combatText.Length)
                 {
-                    Main.combatText[index].lifeTime = 120; // длительность в тиках (~2 секунды)
+                    Main.combatText[index].lifeTime = 120;
                 }
 
             });
         }
     }
-    private void SpawnViewerButterfly(string nickname)
-    {
-        if (Main.netMode == NetmodeID.MultiplayerClient) return;
 
-        // Проверяем уникальность: спавним только если такой ник ещё нет
-        if (Main.npc.Any(n => n.active && n.type == NPCID.Butterfly &&
-                              n.GetGlobalNPC<ViewerButterflyGlobal>().isViewerButterfly &&
-                              n.GetGlobalNPC<ViewerButterflyGlobal>().viewerName == nickname))
+    // --- SpawnViewerButterfly / SpawnCommentFirefly / SpawnGiftFlyingFish / SpawnSubscriberSlime / SpawnVeteranSlime ---
+    // Использую твою существующую реализацию (обёрнутые вызовы) — просто вызываю их как есть.
+
+    private void SpawnViewerButterfly(string nickname, string viewerId)
+    {
+        if (Main.netMode == NetmodeID.MultiplayerClient)
             return;
 
+        // 1. Санитизация ника
+        string cleanName = NickSanitizer.Sanitize(nickname).Trim();
+
+        // Если ник пустой — используем ID
+        if (string.IsNullOrWhiteSpace(cleanName))
+            cleanName = viewerId;
+
+        // 2. Проверяем уникальность бабочки ПО rawId
+        if (Main.npc.Any(n =>
+            n.active &&
+            n.type == NPCID.Butterfly &&
+            n.TryGetGlobalNPC(out ViewerButterflyGlobal g) &&
+            g.isViewerButterfly &&
+            g.rawId == viewerId))
+            return;
+
+        // 3. Спавним бабочку
         Main.QueueMainThreadAction(() =>
         {
             var player = Main.LocalPlayer;
@@ -386,17 +662,19 @@ public class TikFinityClient : ModSystem
             int npcID = NPC.NewNPC(
                 player.GetSource_FromThis(),
                 (int)player.position.X + Main.rand.Next(-200, 200),
-                (int)player.position.Y - 100, // чуть выше игрока
+                (int)player.position.Y - 100,
                 NPCID.Butterfly
             );
 
             if (npcID >= 0)
             {
                 NPC npc = Main.npc[npcID];
-                var global = npc.GetGlobalNPC<ViewerButterflyGlobal>();
-                global.isViewerButterfly = true;
-                global.viewerName = NickSanitizer.Sanitize(nickname);
-                global.lifetime = 0;
+                var g = npc.GetGlobalNPC<ViewerButterflyGlobal>();
+
+                g.isViewerButterfly = true;
+                g.viewerName = cleanName;
+                g.rawId = viewerId;
+                g.lifetime = 0;
             }
         });
     }
@@ -419,21 +697,17 @@ public class TikFinityClient : ModSystem
             if (npcID >= 0)
             {
                 NPC npc = Main.npc[npcID];
-
                 var global = npc.GetGlobalNPC<ViewerFireflyGlobal>();
                 comment = ReplaceEmojis(comment);
 
                 global.viewerName = NickSanitizer.Sanitize(nickname);
                 global.commentText = comment;
                 global.isComment = true;
-
-                // ✅ Важный флаг: это зритель
                 global.isViewer = true;
 
-                npc.timeLeft = 600; // 10 секунд жизни
+                npc.timeLeft = 600;
             }
 
-            // Также вывод в чат
             string chatMessage = $"[TikTok] {nickname}: {comment}";
             if (Main.netMode == NetmodeID.SinglePlayer)
                 Main.NewText(chatMessage, 180, 255, 180);
@@ -453,13 +727,9 @@ public class TikFinityClient : ModSystem
         {
             var player = Main.LocalPlayer;
 
-            int npcType = NPCID.FlyingFish; // по умолчанию
-
-            // Если подарок 10 монет, спавним мимика
+            int npcType = NPCID.FlyingFish;
             if (goldCoins >= 10)
-            {
                 npcType = NPCID.Mimic;
-            }
 
             int npcID = NPC.NewNPC(
                 player.GetSource_FromThis(),
@@ -472,15 +742,9 @@ public class TikFinityClient : ModSystem
             {
                 NPC npc = Main.npc[npcID];
 
-                if (npcType == NPCID.FlyingFish)
+                if (npcType == NPCID.FlyingFish || npcType == NPCID.Mimic)
                 {
                     var global = npc.GetGlobalNPC<GiftFlyingFishGlobal>();
-                    global.giverName = nickname;
-                    global.goldInside = goldCoins;
-                }
-                else if (npcType == NPCID.Mimic)
-                {
-                    var global = npc.GetGlobalNPC<GiftFlyingFishGlobal>(); // используем тот же класс, что для зомби/мимика
                     global.giverName = nickname;
                     global.goldInside = goldCoins;
                 }
@@ -502,16 +766,15 @@ public class TikFinityClient : ModSystem
                 player.GetSource_FromThis(),
                 (int)player.position.X + Main.rand.Next(-200, 200),
                 (int)player.position.Y,
-                NPCID.BlueSlime // ✅ можешь заменить на любой
+                NPCID.BlueSlime
             );
 
             if (npcID >= 0)
             {
                 NPC npc = Main.npc[npcID];
 
-                // Делаем его полностью дружественным
-                npc.friendly = true;      // чтобы не драться с дружественными NPC
-                npc.damage = 20;           // урон только при AI-атаках
+                npc.friendly = true;
+                npc.damage = 20;
                 npc.lifeMax = 350;
                 npc.life = 250;
                 npc.defense = 30;
@@ -520,13 +783,12 @@ public class TikFinityClient : ModSystem
 
                 var global = npc.GetGlobalNPC<ViewerSlimeGlobal>();
                 global.viewerName = NickSanitizer.Sanitize(nickname);
-                global.isSeagull = false; // это не комментарий
-                global.isViewer = true;   // 🔹 ВАЖНО! Без этого ник не отображается
+                global.isSeagull = false;
+                global.isViewer = true;
 
                 npc.netUpdate = true;
             }
 
-            // ✅ Надпись в чат
             Main.NewText($"[Подписчик] {nickname} присоединился!", 255, 215, 100);
         });
     }
@@ -543,7 +805,7 @@ public class TikFinityClient : ModSystem
                 player.GetSource_FromThis(),
                 (int)player.position.X + Main.rand.Next(-200, 200),
                 (int)player.position.Y,
-                NPCID.GoldenSlime // ⭐ золотой слизень
+                NPCID.GoldenSlime
             );
 
             if (npcID >= 0)
@@ -552,7 +814,7 @@ public class TikFinityClient : ModSystem
 
                 npc.friendly = true;
                 npc.damage = 20;
-                npc.lifeMax = 500;  // ⭐ чуть сильнее обычного
+                npc.lifeMax = 500;
                 npc.life = 500;
                 npc.defense = 40;
                 npc.knockBackResist = 0.3f;
@@ -560,7 +822,7 @@ public class TikFinityClient : ModSystem
                 var global = npc.GetGlobalNPC<ViewerSlimeGlobal>();
                 global.viewerName = NickSanitizer.Sanitize(nickname);
                 global.isViewer = true;
-                global.isVeteran = true; // ⭐ флаг, что это особый слизень
+                global.isVeteran = true;
 
                 npc.netUpdate = true;
             }
@@ -568,5 +830,4 @@ public class TikFinityClient : ModSystem
             Main.NewText($"[VIP Подписчик] {nickname} вернулся!", 255, 215, 0);
         });
     }
-
 }
