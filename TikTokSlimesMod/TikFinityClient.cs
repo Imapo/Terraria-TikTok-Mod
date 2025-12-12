@@ -16,7 +16,6 @@ public class TikFinityClient : ModSystem
     private static ClientWebSocket socket;
     private static CancellationTokenSource cancelToken;
     private static Dictionary<string, int> viewerLikes = new Dictionary<string, int>();
-    // ✅ Множество уже спавненных зрителей
     public static HashSet<string> spawnedViewers = new HashSet<string>();
 
     public override void OnWorldLoad()
@@ -27,8 +26,6 @@ public class TikFinityClient : ModSystem
     public override void OnWorldUnload()
     {
         StopClient();
-        // ✅ Очищаем список спавненных зрителей при выгрузке мира
-        spawnedViewers.Clear();
     }
 
     private async void StartClient()
@@ -151,11 +148,28 @@ public class TikFinityClient : ModSystem
                     {
                         bool isFollower = IsFollower(root);
 
-                        if (isFollower)
-                            SpawnSubscriberSlime(nickname); // ✅ подписчик
-                        else
-                            SpawnViewerButterfly(nickname); // обычный зритель
+                        // Новая проверка именно на **подписанного зрителя**
+                        bool isAlreadySubscribed =
+                            root.TryGetProperty("isSubscribed", out var subscribedProp) &&
+                            subscribedProp.ValueKind == JsonValueKind.True;
 
+                        if (isFollower)
+                        {
+                            if (isAlreadySubscribed)
+                            {
+                                // ⚡ Здесь это зритель, который **подписан**
+                                SpawnVeteranSlime(nickname);
+                            }
+                            else
+                            {
+                                // ⚡ Это новая подписка
+                                SpawnSubscriberSlime(nickname);
+                            }
+                        }
+                        else
+                        {
+                            SpawnViewerButterfly(nickname);
+                        }
                         break;
                     }
 
@@ -168,7 +182,7 @@ public class TikFinityClient : ModSystem
                     break;
                 case "gift": // Или "comment", "message" - проверьте какое событие приходит
                     int coins = Main.rand.Next(1, 6); // 1–5
-                    SpawnGiftZombie(nickname, coins);
+                    SpawnGiftFlyingFish(nickname, coins);
                     break;
                 case "follow": // когда подписываются прямо во время стрима
                     {
@@ -313,23 +327,14 @@ public class TikFinityClient : ModSystem
     private string ReplaceEmojis(string input)
     {
         if (string.IsNullOrEmpty(input))
-            return input
-        .Replace("😀", ":)")
-        .Replace("😂", "xD")
-        .Replace("❤️", "<3")
-        .Replace("🔥", "FIRE")
-        .Replace("👍", "+");
+            return input;
 
-        // Удаляем все emoji (Unicode surrogate pairs)
-        var sb = new StringBuilder();
-
-        foreach (char c in input)
-        {
-            if (!char.IsSurrogate(c))
-                sb.Append(c);
-        }
-
-        return sb.ToString();
+        return input
+            .Replace("😀", ":)")
+            .Replace("😂", "xD")
+            .Replace("❤️", "<3")
+            .Replace("🔥", "FIRE")
+            .Replace("👍", "+");
     }
 
     private void ProcessLikeEvent(JsonElement root, string nickname)
@@ -364,14 +369,14 @@ public class TikFinityClient : ModSystem
             });
         }
     }
-    private void SpawnViewerButterfly(string name)
+    private void SpawnViewerButterfly(string nickname)
     {
-        if (Main.netMode == 1) return;
+        if (Main.netMode == NetmodeID.MultiplayerClient) return;
 
         // Проверяем уникальность: спавним только если такой ник ещё нет
         if (Main.npc.Any(n => n.active && n.type == NPCID.Butterfly &&
                               n.GetGlobalNPC<ViewerButterflyGlobal>().isViewerButterfly &&
-                              n.GetGlobalNPC<ViewerButterflyGlobal>().viewerName == name))
+                              n.GetGlobalNPC<ViewerButterflyGlobal>().viewerName == nickname))
             return;
 
         Main.QueueMainThreadAction(() =>
@@ -390,7 +395,7 @@ public class TikFinityClient : ModSystem
                 NPC npc = Main.npc[npcID];
                 var global = npc.GetGlobalNPC<ViewerButterflyGlobal>();
                 global.isViewerButterfly = true;
-                global.viewerName = name;
+                global.viewerName = NickSanitizer.Sanitize(nickname);
                 global.lifetime = 0;
             }
         });
@@ -398,7 +403,7 @@ public class TikFinityClient : ModSystem
 
     private void SpawnCommentFirefly(string nickname, string comment)
     {
-        if (Main.netMode == 1) return;
+        if (Main.netMode == NetmodeID.MultiplayerClient) return;
 
         Main.QueueMainThreadAction(() =>
         {
@@ -418,7 +423,7 @@ public class TikFinityClient : ModSystem
                 var global = npc.GetGlobalNPC<ViewerFireflyGlobal>();
                 comment = ReplaceEmojis(comment);
 
-                global.viewerName = nickname;
+                global.viewerName = NickSanitizer.Sanitize(nickname);
                 global.commentText = comment;
                 global.isComment = true;
 
@@ -440,28 +445,45 @@ public class TikFinityClient : ModSystem
         });
     }
 
-    private void SpawnGiftZombie(string nickname, int goldCoins)
+    private void SpawnGiftFlyingFish(string nickname, int goldCoins)
     {
-        if (Main.netMode == 1) return;
+        if (Main.netMode == NetmodeID.MultiplayerClient) return;
 
         Main.QueueMainThreadAction(() =>
         {
             var player = Main.LocalPlayer;
 
+            int npcType = NPCID.FlyingFish; // по умолчанию
+
+            // Если подарок 10 монет, спавним мимика
+            if (goldCoins >= 10)
+            {
+                npcType = NPCID.Mimic;
+            }
+
             int npcID = NPC.NewNPC(
                 player.GetSource_FromThis(),
                 (int)player.position.X + Main.rand.Next(-300, 300),
                 (int)player.position.Y,
-                NPCID.FlyingFish
+                npcType
             );
 
             if (npcID >= 0)
             {
                 NPC npc = Main.npc[npcID];
 
-                var global = npc.GetGlobalNPC<GiftZombieGlobal>();
-                global.giverName = nickname;
-                global.goldInside = goldCoins; // ✅ золото теперь ВНУТРИ зомби
+                if (npcType == NPCID.FlyingFish)
+                {
+                    var global = npc.GetGlobalNPC<GiftFlyingFishGlobal>();
+                    global.giverName = nickname;
+                    global.goldInside = goldCoins;
+                }
+                else if (npcType == NPCID.Mimic)
+                {
+                    var global = npc.GetGlobalNPC<GiftFlyingFishGlobal>(); // используем тот же класс, что для зомби/мимика
+                    global.giverName = nickname;
+                    global.goldInside = goldCoins;
+                }
 
                 npc.netUpdate = true;
             }
@@ -470,7 +492,7 @@ public class TikFinityClient : ModSystem
 
     private void SpawnSubscriberSlime(string nickname)
     {
-        if (Main.netMode == 1) return;
+        if (Main.netMode == NetmodeID.MultiplayerClient) return;
 
         Main.QueueMainThreadAction(() =>
         {
@@ -488,21 +510,62 @@ public class TikFinityClient : ModSystem
                 NPC npc = Main.npc[npcID];
 
                 // Делаем его полностью дружественным
-                npc.friendly = true;
-                npc.damage = 0;
-                npc.lifeMax = 50;
-                npc.life = 50;
-                npc.chaseable = false;
+                npc.friendly = true;      // чтобы не драться с дружественными NPC
+                npc.damage = 20;           // урон только при AI-атаках
+                npc.lifeMax = 350;
+                npc.life = 250;
+                npc.defense = 30;
+                npc.knockBackResist = 0.5f;
+                npc.chaseable = true;
 
                 var global = npc.GetGlobalNPC<ViewerSlimeGlobal>();
-                global.viewerName = nickname;
+                global.viewerName = NickSanitizer.Sanitize(nickname);
                 global.isSeagull = false; // это не комментарий
+                global.isViewer = true;   // 🔹 ВАЖНО! Без этого ник не отображается
 
                 npc.netUpdate = true;
             }
 
             // ✅ Надпись в чат
             Main.NewText($"[Подписчик] {nickname} присоединился!", 255, 215, 100);
+        });
+    }
+
+    private void SpawnVeteranSlime(string nickname)
+    {
+        if (Main.netMode == NetmodeID.MultiplayerClient) return;
+
+        Main.QueueMainThreadAction(() =>
+        {
+            var player = Main.LocalPlayer;
+
+            int npcID = NPC.NewNPC(
+                player.GetSource_FromThis(),
+                (int)player.position.X + Main.rand.Next(-200, 200),
+                (int)player.position.Y,
+                NPCID.GoldenSlime // ⭐ золотой слизень
+            );
+
+            if (npcID >= 0)
+            {
+                NPC npc = Main.npc[npcID];
+
+                npc.friendly = true;
+                npc.damage = 20;
+                npc.lifeMax = 500;  // ⭐ чуть сильнее обычного
+                npc.life = 500;
+                npc.defense = 40;
+                npc.knockBackResist = 0.3f;
+
+                var global = npc.GetGlobalNPC<ViewerSlimeGlobal>();
+                global.viewerName = NickSanitizer.Sanitize(nickname);
+                global.isViewer = true;
+                global.isVeteran = true; // ⭐ флаг, что это особый слизень
+
+                npc.netUpdate = true;
+            }
+
+            Main.NewText($"[VIP Подписчик] {nickname} вернулся!", 255, 215, 0);
         });
     }
 

@@ -7,6 +7,7 @@ namespace TikTokSlimesMod
         public override void Load()
         {
             Logger.Info("TikTokSlimesMod загружен");
+            TikFont.Load(this);
         }
 
         public override void Unload()
