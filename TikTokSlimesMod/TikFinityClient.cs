@@ -341,54 +341,31 @@ public class TikFinityClient : ModSystem
     }
 
     // Извлекает флаги из структуры message (учитывает разные форматы)
-    private void ExtractUserFlags(JsonElement root, out bool isSubscriber, out bool isModerator, out bool isFollowing)
+    private void ExtractUserFlags(JsonElement root, out bool isSubscriber, out bool isModerator, out bool isFollower)
     {
         isSubscriber = false;
         isModerator = false;
-        isFollowing = false;
+        isFollower = false;
 
-        // Попытка стандартных путей
-        if (root.TryGetProperty("isSubscribed", out var s1) && s1.ValueKind == JsonValueKind.True)
+        if (!root.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Object)
+            return;
+
+        // подписчик
+        if (data.TryGetProperty("isSubscriber", out var sub) && sub.ValueKind == JsonValueKind.True)
             isSubscriber = true;
 
-        if (root.TryGetProperty("isFollower", out var f1) && f1.ValueKind == JsonValueKind.True)
-            isFollowing = true;
+        // модератор
+        if (data.TryGetProperty("isModerator", out var mod) && mod.ValueKind == JsonValueKind.True)
+            isModerator = true;
 
-        // Вложённый user или data.user
-        JsonElement userEl = default;
-        bool hasUser = false;
-
-        if (root.TryGetProperty("user", out userEl) && userEl.ValueKind == JsonValueKind.Object)
-            hasUser = true;
-        else if (root.TryGetProperty("data", out var dataProp) && dataProp.ValueKind == JsonValueKind.Object)
+        // follower
+        if (data.TryGetProperty("userIdentity", out var ui) && ui.ValueKind == JsonValueKind.Object)
         {
-            if (dataProp.TryGetProperty("user", out userEl) && userEl.ValueKind == JsonValueKind.Object)
-                hasUser = true;
-        }
-
-        if (hasUser)
-        {
-            if (userEl.TryGetProperty("isSubscriber", out var s2) && s2.ValueKind == JsonValueKind.True)
-                isSubscriber = true;
-            if (userEl.TryGetProperty("isModerator", out var m2) && m2.ValueKind == JsonValueKind.True)
-                isModerator = true;
-            if (userEl.TryGetProperty("isFollowing", out var f2) && f2.ValueKind == JsonValueKind.True)
-                isFollowing = true;
-
-            // Иногда флаги лежат в data.user.roles или followRole — игнорируем unreliable followRole
-        }
-
-        // Иногда есть в data напрямую
-        if (root.TryGetProperty("data", out var d) && d.ValueKind == JsonValueKind.Object)
-        {
-            if (d.TryGetProperty("isSubscriber", out var ds) && ds.ValueKind == JsonValueKind.True)
-                isSubscriber = true;
-            if (d.TryGetProperty("isModerator", out var dm) && dm.ValueKind == JsonValueKind.True)
-                isModerator = true;
-            if (d.TryGetProperty("isFollowing", out var df) && df.ValueKind == JsonValueKind.True)
-                isFollowing = true;
+            if (ui.TryGetProperty("isFollowerOfAnchor", out var follower) && follower.ValueKind == JsonValueKind.True)
+                isFollower = true;
         }
     }
+
 
     private bool IsFollower(JsonElement root)
     {
@@ -423,7 +400,10 @@ public class TikFinityClient : ModSystem
             string key = ExtractViewerKey(data);
             string nickname = ExtractNickname(data);
 
-            ExtractUserFlags(data, out bool isSubscriber, out bool isModerator, out bool isFollowing);
+            ExtractUserFlags(root, out bool isSubscriber, out bool isModerator, out bool isFollowing);
+            ModContent.GetInstance<global::TikTokSlimesMod.TikTokSlimesMod>()
+            .Logger.Info($"[Tikfinity RAW] {json}");
+
 
             switch (eventType)
             {
@@ -511,19 +491,27 @@ public class TikFinityClient : ModSystem
     {
         AddOrUpdateViewer(key, nickname, isSubscriber, isModerator, isFollowing, "ChatMessage");
 
-        if (isSubscriber)
+        // 🔥 НОВОЕ: фиксация подписчика через чат
+        if (isFollowing && !SubscriberIds.Contains(key))
         {
-            if (!veteranSpawnedThisSession.Contains(key))
+            var entry = new TikFinityClient.SubscriberHistoryEntry
             {
-                SpawnVeteranSlime(nickname); // VIP-слайм
-                veteranSpawnedThisSession.Add(key);
-            }
+                Key = key,
+                Nickname = nickname,
+                Timestamp = DateTime.UtcNow,
+                EventType = "follow",
+                Time = DateTime.Now.ToString("yy.MM.dd HH:mm:ss")
+            };
+
+            TikFinityClient.UpdateSubscriberHistoryJson(entry);
+            TikFinityClient.RebuildSubscriberCache();
         }
 
         if (!string.IsNullOrEmpty(nickname))
         {
             SpawnViewerButterfly(nickname, key);
         }
+
         ProcessChatMessage(data, nickname);
     }
 

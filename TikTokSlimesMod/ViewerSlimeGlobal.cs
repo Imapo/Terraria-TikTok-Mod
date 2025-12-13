@@ -217,29 +217,26 @@ public class ViewerButterflyGlobal : GlobalNPC
     {
         if (!isViewerButterfly || string.IsNullOrEmpty(viewerName)) return;
 
-        // Позиция над NPC
         Vector2 position = npc.Top - new Vector2(0, 20) - screenPos;
-
-        bool isSubscriber = SubscriberHistory.Any(e => e.Key == rawId);
 
         Color nameColor;
 
-        if (isSubscriber)
+        // Проверяем, является ли зритель подписчиком
+        if (TikFinityClient.SubscriberIds.Contains(rawId))
         {
-            // Радужный цвет для подписчиков
+            // Радужный ник для подписчиков
             float hue = (Main.GameUpdateCount % 360) / 360f;
             nameColor = Main.hslToRgb(hue, 1f, 0.5f);
         }
         else
         {
-            // Обычный цвет для всех остальных
-            nameColor = Color.LightPink;
+            // Обычный белый цвет для остальных
+            nameColor = Color.White;
         }
 
         // Учитываем прозрачность NPC
-        nameColor *= (1f - npc.alpha / 255f);
+        nameColor = nameColor * (1f - npc.alpha / 255f);
 
-        // Рисуем ник
         spriteBatch.DrawString(
             TikFont.Font,
             viewerName,
