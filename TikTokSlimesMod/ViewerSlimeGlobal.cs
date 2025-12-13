@@ -59,7 +59,9 @@ public class ViewerSlimeGlobal : GlobalNPC
     private int fadeTicks = 0;
     private int fadeDuration = 0;
     public int attackCooldown = 0; // тикеры до следующей атаки
-    public bool isVeteran; // ⭐ новый флаг
+    public bool isVeteran;
+    public bool isModerator;
+    public bool isGifter;
 
     public void StartFadeOut(int duration)
     {
@@ -172,7 +174,16 @@ public class ViewerSlimeGlobal : GlobalNPC
         Vector2 position = npc.Top - new Vector2(0, 20) - screenPos;
         float scale = text.Length > 30 ? 0.6f : 0.8f;
 
-        Color textColor = Color.White;
+        Color textColor;
+        if (isModerator)
+            textColor = Color.Red;
+        else if (isGifter)
+            textColor = Color.Gold;
+        else if (isVeteran)
+            textColor = Color.Orange;
+        else
+            textColor = Color.White;
+
         if (fadingOut)
             textColor *= 1f - npc.alpha / 255f;
 
@@ -222,15 +233,17 @@ public class ViewerButterflyGlobal : GlobalNPC
         Color nameColor;
 
         // Проверяем, является ли зритель подписчиком
-        if (TikFinityClient.SubscriberIds.Contains(rawId))
+        if (TikFinityClient.GiftGiverIds.Contains(rawId))
         {
-            // Радужный ник для подписчиков
             float hue = (Main.GameUpdateCount % 360) / 360f;
-            nameColor = Main.hslToRgb(hue, 1f, 0.5f);
+            nameColor = Main.hslToRgb(hue, 1f, 0.65f);
+        }
+        else if (TikFinityClient.SubscriberIds.Contains(rawId))
+        {
+            nameColor = Color.Gold;
         }
         else
         {
-            // Обычный белый цвет для остальных
             nameColor = Color.White;
         }
 
@@ -363,6 +376,55 @@ public class GiftFlyingFishGlobal : GlobalNPC
                 ItemID.GoldCoin
             );
         }
+    }
+}
+
+public class GifterDragonflyGlobal : GlobalNPC
+{
+    public override bool InstancePerEntity => true;
+
+    public int lifetime = 0;
+    public bool isGifterDragonfly = false;
+    public string viewerName = "";
+    public string rawId = "";
+
+    public override void AI(NPC npc)
+    {
+        if (!isGifterDragonfly) return;
+
+        lifetime++;
+
+        // Появление и постепенное исчезновение
+        if (lifetime > 540)
+            npc.alpha = (int)MathHelper.Clamp((lifetime - 540) * 4.25f, 0, 255);
+
+        if (lifetime > 600)
+            npc.active = false;
+    }
+
+    public override void PostDraw(NPC npc, SpriteBatch spriteBatch, Vector2 screenPos, Color drawColor)
+    {
+        if (!isGifterDragonfly || string.IsNullOrEmpty(viewerName)) return;
+
+        Vector2 position = npc.Top - new Vector2(0, 20) - screenPos;
+
+        // Красный цвет для всех GifterDragonfly
+        Color nameColor = Color.Red;
+
+        // Учитываем прозрачность NPC
+        nameColor = nameColor * (1f - npc.alpha / 255f);
+
+        spriteBatch.DrawString(
+            TikFont.Font,
+            viewerName,
+            position,
+            nameColor,
+            0f,
+            Vector2.Zero,
+            0.8f,
+            SpriteEffects.None,
+            0f
+        );
     }
 }
 

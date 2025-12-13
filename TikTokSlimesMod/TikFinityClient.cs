@@ -11,22 +11,284 @@ using System.Threading.Tasks;
 using Terraria;
 using Terraria.ID;
 using Terraria.ModLoader;
-using Terraria.ModLoader.IO;
 using System.IO;
+using System.Text.Encodings.Web;
 
 public class TikFinityClient : ModSystem
 {
     private static readonly string ViewerDatabaseFilePath = Path.Combine(Main.SavePath, "TikFinity_ViewerDatabase.json");
     private static readonly string SubscriberHistoryFilePath = Path.Combine(Main.SavePath, "TikFinity_SubscriberHistory.json");
-
     private static List<SubscriberHistoryEntry> subscriberHistory = new List<SubscriberHistoryEntry>();
     private static ClientWebSocket socket;
     private static CancellationTokenSource cancelToken;
-
     private static Dictionary<string, ViewerInfo> viewerDatabase = new Dictionary<string, ViewerInfo>();
     private static HashSet<string> veteranSpawnedThisSession = new HashSet<string>();
-
     public static HashSet<string> SubscriberIds = new HashSet<string>();
+    private const int MAX_VIEWERS = 500;
+    private static readonly string GiftHistoryFilePath =
+    Path.Combine(Main.SavePath, "TikFinity_GiftHistory.json");
+    private static List<GiftHistoryEntry> giftHistory = new();
+    public static HashSet<string> GiftGiverIds = new();
+    private static readonly string ModeratorDatabaseFilePath = Path.Combine(Main.SavePath, "TikFinity_ModeratorDatabase.json");
+    private static Dictionary<string, ModeratorInfo> moderatorDatabase = new Dictionary<string, ModeratorInfo>();
+    // Проверка по истории дарителей
+    private bool IsFollower(JsonElement root)
+    {
+        if (root.TryGetProperty("isSubscribed", out var sub1) && sub1.ValueKind == JsonValueKind.True)
+            return true;
+
+        if (root.TryGetProperty("isFollower", out var sub2) && sub2.ValueKind == JsonValueKind.True)
+            return true;
+
+        if (root.TryGetProperty("follow", out var sub3) && sub3.ValueKind == JsonValueKind.True)
+            return true;
+
+        if (root.TryGetProperty("event", out var ev) && ev.GetString() == "follow")
+            return true;
+
+        return false;
+    }
+
+
+    // -------------------------
+    // Основной обработчик сообщений
+    // -------------------------
+    private void HandleMessage(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            string eventType = root.TryGetProperty("event", out var ev) ? ev.GetString() : "";
+            JsonElement data = root.TryGetProperty("data", out var d) ? d : root;
+
+            string key = ExtractViewerKey(data);
+            string nickname = ExtractNickname(data);
+
+            ExtractUserFlags(root, out bool isSubscriber, out bool isModerator, out bool isFollowing);
+            ModContent.GetInstance<global::TikTokSlimesMod.TikTokSlimesMod>()
+            .Logger.Info($"[Tikfinity RAW] {json}");
+
+            if (string.IsNullOrWhiteSpace(key))
+                return;
+
+            switch (eventType)
+            {
+                case "join":
+                case "roomUser":
+                case "member":
+                case "":
+                    HandleJoinEvent(key, nickname);
+                    break;
+
+                case "chat":
+                    HandleChatEvent(key, nickname, isSubscriber, isModerator, isFollowing, data);
+                    break;
+
+                case "like":
+                    ProcessLikeEvent(data, nickname);
+                    break;
+
+                case "gift":
+                    int amount = data.TryGetProperty("coins", out var c) ? c.GetInt32() : 1;
+                    AddGiftHistory(key, nickname, amount);
+                    SpawnGiftFlyingFish(nickname, amount);
+                    break;
+
+                case "follow":
+                    HandleSubscribeEvent(key, nickname, isModerator, isFollowing);
+                    break;
+
+                default:
+                    // Если неизвестное событие, всё равно обновляем базу, но SourceEvent = eventType или "Unknown"
+                    HandleJoinEvent(key, nickname);
+                    AddOrUpdateViewer(key, nickname, isSubscriber, isModerator, isFollowing, eventType ?? "Unknown");
+                    break;
+            }
+        }
+        catch (JsonException)
+        {
+            // Тихий fail
+        }
+        catch (Exception)
+        {
+            // Тихий fail
+        }
+    }
+
+    public class ModeratorInfo
+    {
+        public string Key { get; set; }               // uniqueId или ник
+        public string Nickname { get; set; }          // ник модератора
+        public bool IsModerator { get; set; } = true; // всегда true
+        public string SourceEvent { get; set; }       // join / chat / gift / etc.
+        public string TextMessage { get; set; }       // для chat-событий
+        public string Time { get; set; }              // время последнего события
+    }
+
+    private void AddOrUpdateModerator(string key, string nickname, string sourceEvent, string textMessage = null)
+    {
+        if (string.IsNullOrWhiteSpace(key) || string.IsNullOrWhiteSpace(nickname))
+            return;
+
+        string now = DateTime.Now.ToString("dd.MM.yy HH:mm:ss");
+
+        if (moderatorDatabase.TryGetValue(key, out var existing))
+        {
+            existing.Nickname = nickname;
+            existing.SourceEvent = sourceEvent;
+            existing.TextMessage = textMessage;
+            existing.Time = now;
+        }
+        else
+        {
+            moderatorDatabase[key] = new ModeratorInfo
+            {
+                Key = key,
+                Nickname = nickname,
+                IsModerator = true,
+                SourceEvent = sourceEvent,
+                TextMessage = textMessage,
+                Time = now
+            };
+        }
+
+        UpdateModeratorDatabaseJson();
+    }
+
+    public static void ImportModeratorDatabase()
+    {
+        try
+        {
+            if (!File.Exists(ModeratorDatabaseFilePath))
+                return;
+
+            string json = File.ReadAllText(ModeratorDatabaseFilePath);
+            var list = JsonSerializer.Deserialize<List<ModeratorInfo>>(json);
+
+            if (list != null)
+            {
+                moderatorDatabase.Clear();
+                foreach (var m in list)
+                {
+                    if (!string.IsNullOrEmpty(m.Key))
+                        moderatorDatabase[m.Key] = m;
+                }
+
+                ModContent.GetInstance<global::TikTokSlimesMod.TikTokSlimesMod>()
+                    .Logger.Info($"[Tikfinity] Moderator database imported from {ModeratorDatabaseFilePath}");
+            }
+        }
+        catch (Exception ex)
+        {
+            ModContent.GetInstance<global::TikTokSlimesMod.TikTokSlimesMod>()
+                .Logger.Info($"[Tikfinity ERROR] Failed to import moderator database: {ex}");
+        }
+    }
+
+
+    public static void UpdateModeratorDatabaseJson()
+    {
+        try
+        {
+            var list = moderatorDatabase.Values.ToList();
+            var options = new JsonSerializerOptions
+            {
+                WriteIndented = true,
+                Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+            };
+            string json = JsonSerializer.Serialize(list, options);
+            File.WriteAllText(ModeratorDatabaseFilePath, json);
+        }
+        catch (Exception ex)
+        {
+            ModContent.GetInstance<global::TikTokSlimesMod.TikTokSlimesMod>()
+                .Logger.Info($"[Tikfinity ERROR] Failed to update moderator JSON: {ex}");
+        }
+    }
+
+    private static void ImportGiftHistory()
+    {
+        if (!File.Exists(GiftHistoryFilePath))
+            return;
+
+        var json = File.ReadAllText(GiftHistoryFilePath);
+        var list = JsonSerializer.Deserialize<List<GiftHistoryEntry>>(json);
+
+        if (list != null)
+        {
+            giftHistory = list;
+            RebuildGiftGiverCache();
+        }
+    }
+
+
+    private static void AddGiftHistory(string key, string nickname, int coins)
+    {
+        giftHistory.Add(new GiftHistoryEntry
+        {
+            Key = key,
+            Nickname = nickname,
+            Coins = coins,
+            Time = DateTime.Now.ToString("dd.MM.yy HH:mm:ss")
+        });
+
+        // ограничим, например, до 300 подарков
+        if (giftHistory.Count > 300)
+            giftHistory.RemoveAt(0);
+
+        File.WriteAllText(
+            GiftHistoryFilePath,
+            JsonSerializer.Serialize(giftHistory, new JsonSerializerOptions
+            {
+                WriteIndented = true,
+                Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+            })
+        );
+
+        RebuildGiftGiverCache();
+    }
+
+    private static void RebuildGiftGiverCache()
+    {
+        GiftGiverIds.Clear();
+        foreach (var g in giftHistory)
+        {
+            if (!string.IsNullOrEmpty(g.Key))
+                GiftGiverIds.Add(g.Key);
+        }
+    }
+
+    public class GiftHistoryEntry
+    {
+        public string Key { get; set; }
+        public string Nickname { get; set; }
+        public int Coins { get; set; }
+        public string Time { get; set; }
+    }
+
+    private static void TrimViewerDatabase()
+    {
+        if (viewerDatabase.Count <= MAX_VIEWERS)
+            return;
+
+        var ordered = viewerDatabase
+            .OrderBy(v =>
+            {
+                if (DateTime.TryParse(v.Value.Time, out var t))
+                    return t;
+                return DateTime.MinValue;
+            })
+            .ToList();
+
+        int removeCount = viewerDatabase.Count - MAX_VIEWERS;
+
+        for (int i = 0; i < removeCount; i++)
+        {
+            viewerDatabase.Remove(ordered[i].Key);
+        }
+    }
 
     private static void RebuildSubscriberCache()
     {
@@ -53,7 +315,11 @@ public class TikFinityClient : ModSystem
         try
         {
             subscriberHistory.Add(entry);
-            var options = new JsonSerializerOptions { WriteIndented = true };
+            var options = new JsonSerializerOptions
+            {
+                WriteIndented = true,
+                Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+            };
             string json = JsonSerializer.Serialize(subscriberHistory, options);
             File.WriteAllText(SubscriberHistoryFilePath, json);
         }
@@ -88,6 +354,7 @@ public class TikFinityClient : ModSystem
     {
         public string Key { get; set; }
         public string Nickname { get; set; }
+        public string TextMessage { get; set; }
         public bool IsSubscriber { get; set; }
         public bool IsModerator { get; set; }
         public bool IsFollowing { get; set; }
@@ -109,7 +376,8 @@ public class TikFinityClient : ModSystem
 
             var options = new JsonSerializerOptions
             {
-                WriteIndented = true
+                WriteIndented = true,
+                Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
             };
 
             string json = JsonSerializer.Serialize(list, options);
@@ -159,7 +427,11 @@ public class TikFinityClient : ModSystem
         try
         {
             var list = viewerDatabase.Values.ToList();
-            var options = new JsonSerializerOptions { WriteIndented = true };
+            var options = new JsonSerializerOptions
+            {
+                WriteIndented = true,
+                Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+            };
             string json = JsonSerializer.Serialize(list, options);
             File.WriteAllText(ViewerDatabaseFilePath, json);
         }
@@ -175,6 +447,7 @@ public class TikFinityClient : ModSystem
     // -------------------------
     public override void OnWorldLoad()
     {
+        ImportGiftHistory();
         ImportViewerDatabase();
         ImportSubscriberHistory();
         StartClient();
@@ -337,7 +610,7 @@ public class TikFinityClient : ModSystem
 
         // Фолбэк — используем nickname (не идеально, но лучше чем ничего)
         string nick = ExtractNickname(root);
-        return string.IsNullOrEmpty(nick) ? Guid.NewGuid().ToString() : nick;
+        return string.IsNullOrEmpty(nick) ? null : nick;
     }
 
     // Извлекает флаги из структуры message (учитывает разные форматы)
@@ -366,96 +639,25 @@ public class TikFinityClient : ModSystem
         }
     }
 
-
-    private bool IsFollower(JsonElement root)
-    {
-        if (root.TryGetProperty("isSubscribed", out var sub1) && sub1.ValueKind == JsonValueKind.True)
-            return true;
-
-        if (root.TryGetProperty("isFollower", out var sub2) && sub2.ValueKind == JsonValueKind.True)
-            return true;
-
-        if (root.TryGetProperty("follow", out var sub3) && sub3.ValueKind == JsonValueKind.True)
-            return true;
-
-        if (root.TryGetProperty("event", out var ev) && ev.GetString() == "follow")
-            return true;
-
-        return false;
-    }
-
-    // -------------------------
-    // Основной обработчик сообщений
-    // -------------------------
-    private void HandleMessage(string json)
-    {
-        try
-        {
-            using var doc = JsonDocument.Parse(json);
-            var root = doc.RootElement;
-
-            string eventType = root.TryGetProperty("event", out var ev) ? ev.GetString() : "";
-            JsonElement data = root.TryGetProperty("data", out var d) ? d : root;
-
-            string key = ExtractViewerKey(data);
-            string nickname = ExtractNickname(data);
-
-            ExtractUserFlags(root, out bool isSubscriber, out bool isModerator, out bool isFollowing);
-            ModContent.GetInstance<global::TikTokSlimesMod.TikTokSlimesMod>()
-            .Logger.Info($"[Tikfinity RAW] {json}");
-
-
-            switch (eventType)
-            {
-                case "join":
-                case "roomUser":
-                case "member":
-                case "":
-                    HandleJoinEvent(key, nickname);
-                    break;
-
-                case "chat":
-                    HandleChatEvent(key, nickname, isSubscriber, isModerator, isFollowing, data);
-                    break;
-
-                case "like":
-                    ProcessLikeEvent(data, nickname);
-                    break;
-
-                case "gift":
-                    int amount = data.TryGetProperty("coins", out var c) ? c.GetInt32() : 1;
-                    SpawnGiftFlyingFish(nickname, amount);
-                    break;
-
-                case "follow":
-                    HandleSubscribeEvent(key, nickname, isModerator, isFollowing);
-                    break;
-
-                default:
-                    // Если неизвестное событие, всё равно обновляем базу, но SourceEvent = eventType или "Unknown"
-                    HandleJoinEvent(key, nickname);
-                    AddOrUpdateViewer(key, nickname, isSubscriber, isModerator, isFollowing, eventType ?? "Unknown");
-                    break;
-            }
-        }
-        catch (JsonException)
-        {
-            // Тихий fail
-        }
-        catch (Exception)
-        {
-            // Тихий fail
-        }
-    }
-
     private void AddOrUpdateViewer(
     string key,
     string nickname,
     bool isSubscriber,
     bool isModerator,
     bool isFollowing,
-    string sourceEvent)
+    string sourceEvent,
+    string textMessage = null)
     {
+        if (string.IsNullOrWhiteSpace(key))
+            return;
+
+        if (sourceEvent == "config" || sourceEvent == "Unknown")
+            return;
+
+        // ❌ ChatMessage без текста — не пишем
+        if (sourceEvent == "ChatMessage" && string.IsNullOrWhiteSpace(textMessage))
+            return;
+
         string now = DateTime.Now.ToString("dd.MM.yy HH:mm:ss");
 
         if (viewerDatabase.TryGetValue(key, out var existing))
@@ -464,11 +666,11 @@ public class TikFinityClient : ModSystem
             existing.IsSubscriber = isSubscriber;
             existing.IsModerator = isModerator;
             existing.IsFollowing = isFollowing;
-
-            if (!string.IsNullOrEmpty(sourceEvent))
-                existing.SourceEvent = sourceEvent;
-
+            existing.SourceEvent = sourceEvent;
             existing.Time = now;
+            // 🔥 пишем текст ТОЛЬКО если он есть
+            if (!string.IsNullOrWhiteSpace(textMessage))
+                existing.TextMessage = textMessage;
         }
         else
         {
@@ -476,6 +678,7 @@ public class TikFinityClient : ModSystem
             {
                 Key = key,
                 Nickname = nickname,
+                TextMessage = textMessage,
                 IsSubscriber = isSubscriber,
                 IsModerator = isModerator,
                 IsFollowing = isFollowing,
@@ -483,33 +686,54 @@ public class TikFinityClient : ModSystem
                 Time = now
             };
         }
-
+        TrimViewerDatabase();
         UpdateViewerDatabaseJson();
     }
 
-    private void HandleChatEvent(string key, string nickname, bool isSubscriber, bool isModerator, bool isFollowing, JsonElement data)
+    private void HandleChatEvent(
+    string key,
+    string nickname,
+    bool isSubscriber,
+    bool isModerator,
+    bool isFollowing,
+    JsonElement data)
     {
-        AddOrUpdateViewer(key, nickname, isSubscriber, isModerator, isFollowing, "ChatMessage");
+        // 1️⃣ извлекаем текст
+        string messageText = ExtractCommentText(data);
 
-        // 🔥 НОВОЕ: фиксация подписчика через чат
+        // 2️⃣ ЛОГИРУЕМ ТОЛЬКО если текст не пустой
+        if (!string.IsNullOrWhiteSpace(messageText))
+        {
+            AddOrUpdateViewer(
+                key,
+                nickname,
+                isSubscriber,
+                isModerator,
+                isFollowing,
+                "ChatMessage",
+                messageText
+            );
+        }
+
+        // 3️⃣ остальная логика не меняется
         if (isFollowing && !SubscriberIds.Contains(key))
         {
-            var entry = new TikFinityClient.SubscriberHistoryEntry
+            var entry = new SubscriberHistoryEntry
             {
                 Key = key,
                 Nickname = nickname,
                 Timestamp = DateTime.UtcNow,
                 EventType = "follow",
-                Time = DateTime.Now.ToString("yy.MM.dd HH:mm:ss")
+                Time = DateTime.Now.ToString("dd.MM.yy HH:mm:ss")
             };
 
-            TikFinityClient.UpdateSubscriberHistoryJson(entry);
-            TikFinityClient.RebuildSubscriberCache();
+            UpdateSubscriberHistoryJson(entry);
+            RebuildSubscriberCache();
         }
 
-        if (!string.IsNullOrEmpty(nickname))
+        if (isModerator)
         {
-            SpawnViewerButterfly(nickname, key);
+            AddOrUpdateModerator(key, nickname, "ChatMessage", ExtractCommentText(data));
         }
 
         ProcessChatMessage(data, nickname);
@@ -536,10 +760,37 @@ public class TikFinityClient : ModSystem
 
     private void HandleJoinEvent(string key, string nickname)
     {
-        if (!string.IsNullOrEmpty(nickname))
+        if (string.IsNullOrEmpty(nickname))
+            return;
+
+        // 🦋 бабочка всегда
+        SpawnViewerButterfly(nickname, key);
+
+        // 🟡 если это подписчик — ветеран
+        if (SubscriberIds.Contains(key) && !veteranSpawnedThisSession.Contains(key))
         {
-            SpawnViewerButterfly(nickname, key);
+            SpawnVeteranSlime(nickname);
+            veteranSpawnedThisSession.Add(key);
         }
+
+        // 🔥 если пользователь есть в базе дарителей — спавним драгонфлай
+        if (GiftGiverIds.Contains(key))
+        {
+            SpawnGifterDragonfly(nickname, key);
+        }
+
+        // 🔥 если пользователь — модератор — спавним огненного слизня
+        if (moderatorDatabase.ContainsKey(key))
+        {
+            SpawnModeratorSlime(nickname);
+        }
+
+        // 🔥 если пользователь есть в базе дарителей — спавним золотого слизня
+        if (GiftGiverIds.Contains(key))
+        {
+            SpawnGifterSlime(nickname);
+        }
+
     }
 
     // -------------------------
@@ -553,7 +804,7 @@ public class TikFinityClient : ModSystem
         if (string.IsNullOrEmpty(commentText))
             return;
 
-        // 2. Спавним чайку с комментарием
+        // 2. Спавним бабочку с комментарием
         SpawnCommentFirefly(nickname, commentText);
     }
 
@@ -789,7 +1040,7 @@ public class TikFinityClient : ModSystem
                 npc.netUpdate = true;
             }
 
-            Main.NewText($"[Подписчик] {nickname} присоединился!", 255, 215, 100);
+            Main.NewText($"[Новый подписчик] {nickname}!", 255, 10, 100);
         });
     }
 
@@ -805,7 +1056,7 @@ public class TikFinityClient : ModSystem
                 player.GetSource_FromThis(),
                 (int)player.position.X + Main.rand.Next(-200, 200),
                 (int)player.position.Y,
-                NPCID.GoldenSlime
+                NPCID.RedSlime
             );
 
             if (npcID >= 0)
@@ -827,7 +1078,134 @@ public class TikFinityClient : ModSystem
                 npc.netUpdate = true;
             }
 
-            Main.NewText($"[VIP Подписчик] {nickname} вернулся!", 255, 215, 0);
+            Main.NewText($"[Подписчик] {nickname} прибыл!", 255, 215, 0);
         });
     }
+
+    private void SpawnGifterDragonfly(string nickname, string viewerId)
+    {
+        if (Main.netMode == NetmodeID.MultiplayerClient)
+            return;
+
+        string cleanName = NickSanitizer.Sanitize(nickname).Trim();
+        if (string.IsNullOrWhiteSpace(cleanName))
+            cleanName = viewerId;
+
+        // ❗ Проверка уникальности — один даритель = одна стрекоза
+        if (Main.npc.Any(n =>
+            n.active &&
+            n.type == NPCID.GoldDragonfly &&
+            n.TryGetGlobalNPC(out GifterDragonflyGlobal g) &&
+            g.isGifterDragonfly &&
+            g.rawId == viewerId))
+            return;
+
+        Main.QueueMainThreadAction(() =>
+        {
+            var player = Main.LocalPlayer;
+
+            int npcID = NPC.NewNPC(
+                player.GetSource_FromThis(),
+                (int)player.position.X + Main.rand.Next(-200, 200),
+                (int)player.position.Y - 120,
+                NPCID.GoldDragonfly
+            );
+
+            if (npcID >= 0)
+            {
+                NPC npc = Main.npc[npcID];
+                var g = npc.GetGlobalNPC<GifterDragonflyGlobal>();
+
+                g.isGifterDragonfly = true;
+                g.viewerName = cleanName;
+                g.rawId = viewerId;
+                g.lifetime = 0;
+
+                npc.netUpdate = true;
+            }
+            Main.NewText($"[Даритель] {nickname} прибыл!", 255, 100, 10);
+        });
+    }
+
+    private void SpawnModeratorSlime(string nickname)
+    {
+        if (Main.netMode == NetmodeID.MultiplayerClient) return;
+
+        Main.QueueMainThreadAction(() =>
+        {
+            var player = Main.LocalPlayer;
+
+            int npcID = NPC.NewNPC(
+                player.GetSource_FromThis(),
+                (int)player.position.X + Main.rand.Next(-200, 200),
+                (int)player.position.Y,
+                NPCID.LavaSlime
+            );
+
+            if (npcID >= 0)
+            {
+                NPC npc = Main.npc[npcID];
+
+                npc.friendly = true;
+                npc.damage = 25;       // чуть сильнее обычного слизня
+                npc.lifeMax = 400;
+                npc.life = 400;
+                npc.defense = 35;
+                npc.knockBackResist = 0.5f;
+                npc.chaseable = true;
+
+                var global = npc.GetGlobalNPC<ViewerSlimeGlobal>();
+                global.viewerName = NickSanitizer.Sanitize(nickname);
+                global.isSeagull = false;
+                global.isViewer = true;
+                global.isVeteran = true; // ⚡ модератор
+
+                npc.netUpdate = true;
+            }
+
+            Main.NewText($"[Модератор] {nickname} прибыл!", 255, 80, 20);
+        });
+    }
+
+    private void SpawnGifterSlime(string nickname)
+    {
+        if (Main.netMode == NetmodeID.MultiplayerClient) return;
+
+        Main.QueueMainThreadAction(() =>
+        {
+            var player = Main.LocalPlayer;
+
+            int npcID = NPC.NewNPC(
+                player.GetSource_FromThis(),
+                (int)player.position.X + Main.rand.Next(-200, 200),
+                (int)player.position.Y,
+                NPCID.GoldenSlime
+            );
+
+            if (npcID >= 0)
+            {
+                NPC npc = Main.npc[npcID];
+
+                npc.friendly = true;
+                npc.damage = 20;       // можно чуть больше или меньше по желанию
+                npc.lifeMax = 500;
+                npc.life = 500;
+                npc.defense = 40;
+                npc.knockBackResist = 0.3f;
+                npc.chaseable = true;
+
+                var global = npc.GetGlobalNPC<ViewerSlimeGlobal>();
+                global.viewerName = NickSanitizer.Sanitize(nickname);
+                global.isSeagull = false;
+                global.isViewer = true;
+                // ⚡ можем добавить отдельный флаг, если нужно различать в PostDraw
+                // например, global.isGifter = true;
+
+                npc.netUpdate = true;
+            }
+
+            Main.NewText($"[Даритель] {nickname} прибыл!", 255, 215, 0);
+        });
+    }
+
 }
