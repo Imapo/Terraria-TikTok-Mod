@@ -773,12 +773,6 @@ public class TikFinityClient : ModSystem
             veteranSpawnedThisSession.Add(key);
         }
 
-        // 🔥 если пользователь есть в базе дарителей — спавним драгонфлай
-        if (GiftGiverIds.Contains(key))
-        {
-            SpawnGifterDragonfly(nickname, key);
-        }
-
         // 🔥 если пользователь — модератор — спавним огненного слизня
         if (moderatorDatabase.ContainsKey(key))
         {
@@ -788,6 +782,7 @@ public class TikFinityClient : ModSystem
         // 🔥 если пользователь есть в базе дарителей — спавним золотого слизня
         if (GiftGiverIds.Contains(key))
         {
+            // SpawnGifterDragonfly(nickname, key);
             SpawnGifterSlime(nickname);
         }
 
@@ -959,9 +954,9 @@ public class TikFinityClient : ModSystem
                 npc.timeLeft = 600;
             }
 
-            string chatMessage = $"[TikTok] {nickname}: {comment}";
+            string chatMessage = $"[Чат] {nickname}: {comment}";
             if (Main.netMode == NetmodeID.SinglePlayer)
-                Main.NewText(chatMessage, 180, 255, 180);
+                Main.NewText(chatMessage, 255, 255, 255);
             else if (Main.netMode == NetmodeID.Server)
                 Terraria.Chat.ChatHelper.BroadcastChatMessage(
                     Terraria.Localization.NetworkText.FromLiteral(chatMessage),
