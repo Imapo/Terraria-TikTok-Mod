@@ -67,7 +67,7 @@ public class TikFinityClient : ModSystem
             string nickname = ExtractNickname(data);
 
             ExtractUserFlags(root, out bool isSubscriber, out bool isModerator, out bool isFollowing);
-            ModContent.GetInstance<global::TikTokSlimesMod.TikTokSlimesMod>()
+            ModContent.GetInstance<global::ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>()
             .Logger.Info($"[Tikfinity RAW] {json}");
 
             if (string.IsNullOrWhiteSpace(key))
@@ -176,13 +176,13 @@ public class TikFinityClient : ModSystem
                         moderatorDatabase[m.Key] = m;
                 }
 
-                ModContent.GetInstance<global::TikTokSlimesMod.TikTokSlimesMod>()
+                ModContent.GetInstance<global::ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>()
                     .Logger.Info($"[Tikfinity] Moderator database imported from {ModeratorDatabaseFilePath}");
             }
         }
         catch (Exception ex)
         {
-            ModContent.GetInstance<global::TikTokSlimesMod.TikTokSlimesMod>()
+            ModContent.GetInstance<global::ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>()
                 .Logger.Info($"[Tikfinity ERROR] Failed to import moderator database: {ex}");
         }
     }
@@ -203,7 +203,7 @@ public class TikFinityClient : ModSystem
         }
         catch (Exception ex)
         {
-            ModContent.GetInstance<global::TikTokSlimesMod.TikTokSlimesMod>()
+            ModContent.GetInstance<global::ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>()
                 .Logger.Info($"[Tikfinity ERROR] Failed to update moderator JSON: {ex}");
         }
     }
@@ -325,7 +325,7 @@ public class TikFinityClient : ModSystem
         }
         catch (Exception ex)
         {
-            ModContent.GetInstance<global::TikTokSlimesMod.TikTokSlimesMod>()
+            ModContent.GetInstance<global::ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>()
                 .Logger.Info($"[Tikfinity ERROR] Failed to update subscriber history JSON: {ex}");
         }
     }
@@ -345,7 +345,7 @@ public class TikFinityClient : ModSystem
         }
         catch (Exception ex)
         {
-            ModContent.GetInstance<global::TikTokSlimesMod.TikTokSlimesMod>()
+            ModContent.GetInstance<global::ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>()
                 .Logger.Info($"[Tikfinity ERROR] Failed to import subscriber history: {ex}");
         }
     }
@@ -383,11 +383,11 @@ public class TikFinityClient : ModSystem
             string json = JsonSerializer.Serialize(list, options);
 
             File.WriteAllText(ViewerDatabaseFilePath, json);
-            ModContent.GetInstance<global::TikTokSlimesMod.TikTokSlimesMod>().Logger.Info($"[Tikfinity] Viewer database exported to {ViewerDatabaseFilePath}");
+            ModContent.GetInstance<global::ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>().Logger.Info($"[Tikfinity] Viewer database exported to {ViewerDatabaseFilePath}");
         }
         catch (Exception ex)
         {
-            ModContent.GetInstance<global::TikTokSlimesMod.TikTokSlimesMod>().Logger.Info($"[Tikfinity ERROR] Failed to export viewer database: {ex}");
+            ModContent.GetInstance<global::ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>().Logger.Info($"[Tikfinity ERROR] Failed to export viewer database: {ex}");
         }
     }
 
@@ -413,12 +413,12 @@ public class TikFinityClient : ModSystem
                         viewerDatabase[v.Key] = v;
                 }
 
-                ModContent.GetInstance<global::TikTokSlimesMod.TikTokSlimesMod>().Logger.Info($"[Tikfinity] Viewer database imported from {ViewerDatabaseFilePath}");
+                ModContent.GetInstance<global::ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>().Logger.Info($"[Tikfinity] Viewer database imported from {ViewerDatabaseFilePath}");
             }
         }
         catch (Exception ex)
         {
-            ModContent.GetInstance<global::TikTokSlimesMod.TikTokSlimesMod>().Logger.Info($"[Tikfinity ERROR] Failed to import viewer database: {ex}");
+            ModContent.GetInstance<global::ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>().Logger.Info($"[Tikfinity ERROR] Failed to import viewer database: {ex}");
         }
     }
 
@@ -437,7 +437,7 @@ public class TikFinityClient : ModSystem
         }
         catch (Exception ex)
         {
-            ModContent.GetInstance<global::TikTokSlimesMod.TikTokSlimesMod>()
+            ModContent.GetInstance<global::ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>()
                 .Logger.Info($"[Tikfinity ERROR] Failed to update viewer JSON: {ex}");
         }
     }
@@ -1032,7 +1032,7 @@ public class TikFinityClient : ModSystem
                 npc.knockBackResist = 0.5f;
                 npc.chaseable = true;
 
-                var global = npc.GetGlobalNPC<ViewerSlimeGlobal>();
+                var global = npc.GetGlobalNPC<ImapoTikTokIntegrationModGlobal>();
                 global.viewerName = NickSanitizer.Sanitize(nickname);
                 global.isSeagull = false;
                 global.isViewer = true;
@@ -1070,7 +1070,7 @@ public class TikFinityClient : ModSystem
                 npc.defense = 40;
                 npc.knockBackResist = 0.3f;
 
-                var global = npc.GetGlobalNPC<ViewerSlimeGlobal>();
+                var global = npc.GetGlobalNPC<ImapoTikTokIntegrationModGlobal>();
                 global.viewerName = NickSanitizer.Sanitize(nickname);
                 global.isViewer = true;
                 global.isVeteran = true;
@@ -1154,7 +1154,7 @@ public class TikFinityClient : ModSystem
                 npc.knockBackResist = 0.5f;
                 npc.chaseable = true;
 
-                var global = npc.GetGlobalNPC<ViewerSlimeGlobal>();
+                var global = npc.GetGlobalNPC<ImapoTikTokIntegrationModGlobal>();
                 global.viewerName = NickSanitizer.Sanitize(nickname);
                 global.isSeagull = false;
                 global.isViewer = true;
@@ -1194,7 +1194,7 @@ public class TikFinityClient : ModSystem
                 npc.knockBackResist = 0.3f;
                 npc.chaseable = true;
 
-                var global = npc.GetGlobalNPC<ViewerSlimeGlobal>();
+                var global = npc.GetGlobalNPC<ImapoTikTokIntegrationModGlobal>();
                 global.viewerName = NickSanitizer.Sanitize(nickname);
                 global.isSeagull = false;
                 global.isViewer = true;
