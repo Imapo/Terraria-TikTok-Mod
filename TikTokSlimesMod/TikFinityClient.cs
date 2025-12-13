@@ -26,12 +26,26 @@ public class TikFinityClient : ModSystem
     private static Dictionary<string, ViewerInfo> viewerDatabase = new Dictionary<string, ViewerInfo>();
     private static HashSet<string> veteranSpawnedThisSession = new HashSet<string>();
 
+    public static HashSet<string> SubscriberIds = new HashSet<string>();
+
+    private static void RebuildSubscriberCache()
+    {
+        SubscriberIds.Clear();
+        foreach (var s in subscriberHistory)
+        {
+            if (!string.IsNullOrEmpty(s.Key))
+                SubscriberIds.Add(s.Key);
+        }
+    }
+
     public class SubscriberHistoryEntry
     {
         public string Key { get; set; }
         public string Nickname { get; set; }
         public DateTime Timestamp { get; set; }
         public string EventType { get; set; } // subscribe, member, etc.
+        // Человекочитаемая дата
+        public string Time { get; set; }
     }
 
     public static void UpdateSubscriberHistoryJson(SubscriberHistoryEntry entry)
@@ -57,7 +71,11 @@ public class TikFinityClient : ModSystem
             if (!File.Exists(SubscriberHistoryFilePath)) return;
             string json = File.ReadAllText(SubscriberHistoryFilePath);
             var list = JsonSerializer.Deserialize<List<SubscriberHistoryEntry>>(json);
-            if (list != null) subscriberHistory = list;
+            if (list != null)
+            {
+                subscriberHistory = list;
+                RebuildSubscriberCache();
+            }
         }
         catch (Exception ex)
         {
@@ -73,9 +91,10 @@ public class TikFinityClient : ModSystem
         public bool IsSubscriber { get; set; }
         public bool IsModerator { get; set; }
         public bool IsFollowing { get; set; }
-
         // Новое поле для логирования источника события
         public string SourceEvent { get; set; }
+        // Человекочитаемое время последнего события
+        public string Time { get; set; }
     }
 
     // -------------------------
@@ -157,6 +176,7 @@ public class TikFinityClient : ModSystem
     public override void OnWorldLoad()
     {
         ImportViewerDatabase();
+        ImportSubscriberHistory();
         StartClient();
     }
 
@@ -448,31 +468,40 @@ public class TikFinityClient : ModSystem
         }
     }
 
-    private void AddOrUpdateViewer(string key, string nickname, bool isSubscriber, bool isModerator, bool isFollowing, string sourceEvent)
+    private void AddOrUpdateViewer(
+    string key,
+    string nickname,
+    bool isSubscriber,
+    bool isModerator,
+    bool isFollowing,
+    string sourceEvent)
     {
+        string now = DateTime.Now.ToString("dd.MM.yy HH:mm:ss");
+
         if (viewerDatabase.TryGetValue(key, out var existing))
         {
-            // Обновляем только состояние и ник
             existing.Nickname = nickname;
             existing.IsSubscriber = isSubscriber;
             existing.IsModerator = isModerator;
             existing.IsFollowing = isFollowing;
-            // SourceEvent меняем только если пришло новое событие
+
             if (!string.IsNullOrEmpty(sourceEvent))
                 existing.SourceEvent = sourceEvent;
+
+            existing.Time = now;
         }
         else
         {
-            var viewer = new ViewerInfo
+            viewerDatabase[key] = new ViewerInfo
             {
                 Key = key,
                 Nickname = nickname,
                 IsSubscriber = isSubscriber,
                 IsModerator = isModerator,
                 IsFollowing = isFollowing,
-                SourceEvent = sourceEvent
+                SourceEvent = sourceEvent,
+                Time = now
             };
-            viewerDatabase[key] = viewer;
         }
 
         UpdateViewerDatabaseJson();
@@ -510,9 +539,11 @@ public class TikFinityClient : ModSystem
             Key = key,
             Nickname = nickname,
             Timestamp = DateTime.UtcNow,
-            EventType = "subscribe"
+            EventType = "subscribe",
+            Time = DateTime.Now.ToString("dd.MM.yy HH:mm:ss")
         };
         UpdateSubscriberHistoryJson(entry);
+        RebuildSubscriberCache();
     }
 
     private void HandleJoinEvent(string key, string nickname)
@@ -521,25 +552,6 @@ public class TikFinityClient : ModSystem
         {
             SpawnViewerButterfly(nickname, key);
         }
-    }
-
-    private void RemoveViewerFromWorld(string key)
-    {
-        string nickname = viewerDatabase[key].Nickname;
-
-        Main.QueueMainThreadAction(() =>
-        {
-            foreach (var npc in Main.npc)
-            {
-                if (!npc.active) continue;
-
-                var global = npc.GetGlobalNPC<ViewerSlimeGlobal>();
-                if (global != null && global.isViewer && global.viewerName == nickname)
-                {
-                    npc.active = false;
-                }
-            }
-        });
     }
 
     // -------------------------
