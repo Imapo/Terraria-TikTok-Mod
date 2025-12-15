@@ -209,7 +209,9 @@ public class ViewerSlimesGlobal : GlobalNPC
         return best;
     }
 
-    // ====== ДВИЖЕНИЕ К ЦЕЛИ / ИГРОКУ ======
+    private const float JumpHeight = -7f; // сила прыжка
+    private int jumpCooldown = 0; // таймер задержки прыжка
+
     private void HandleMovement(NPC npc, Player owner, NPC target)
     {
         Vector2 destination = target != null ? target.Center : owner.Center;
@@ -224,15 +226,32 @@ public class ViewerSlimesGlobal : GlobalNPC
             return;
         }
 
-        // Следование
+        // Следуем по горизонтали
         if (distance > 20f)
         {
-            Vector2 dir = destination - npc.Center;
-            dir.Normalize();
-            npc.velocity = Vector2.Lerp(npc.velocity, dir * MoveSpeed, 0.08f);
+            float dirX = destination.X > npc.Center.X ? 1f : -1f;
+            float speedX = MoveSpeed * dirX;
+            npc.velocity.X = MathHelper.Lerp(npc.velocity.X, speedX, 0.08f);
             npc.direction = npc.velocity.X > 0 ? 1 : -1;
         }
+
+        // Обработка естественного прыжка
+        if (jumpCooldown > 0)
+            jumpCooldown--;
+
+        bool onGround = npc.velocity.Y == 0f && npc.collideY; // на земле
+        if (onGround && jumpCooldown == 0)
+        {
+            // Прыжок при препятствии или когда нужно догнать игрока/врага
+            if ((target != null && Math.Abs(npc.Center.X - target.Center.X) > 10f) ||
+                (Math.Abs(npc.Center.X - owner.Center.X) > 80f))
+            {
+                npc.velocity.Y = JumpHeight;
+                jumpCooldown = 20 + Main.rand.Next(10); // случайная пауза между прыжками
+            }
+        }
     }
+
 
     // ====== АТАКА ======
     private void HandleAttack(NPC npc, NPC target)
