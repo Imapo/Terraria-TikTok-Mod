@@ -65,24 +65,30 @@ public class VisualLifetimeGlobalNPC : GlobalNPC
     {
         if (!isTimed) return;
 
-        // Уменьшаем после расчёта
         int currentLifetime = lifetime;
         lifetime--;
 
+        // fade до исчезновения
         if (currentLifetime <= FadeDuration)
         {
             float progress = 1f - (currentLifetime / (float)FadeDuration);
             npc.alpha = (int)(progress * 255f);
         }
 
+        // превращение в стрекозу
         if (lifetime == 0 && !transformedToVisual)
         {
             transformedToVisual = true;
 
-            // 🔥 превращаем в визуального NPC
+            // сохраняем ник до превращения
+            string oldViewerName = "";
+            if (npc.TryGetGlobalNPC<ViewerSlimesGlobal>(out var slimeGlobal))
+                oldViewerName = slimeGlobal.viewerName;
+
+            // 🔥 превращаем в стрекозу
             npc.Transform(NPCID.GreenDragonfly);
 
-            // делаем его "призраком"
+            // делаем стрекозу "призраком"
             npc.friendly = true;
             npc.damage = 0;
             npc.dontTakeDamage = true;
@@ -90,17 +96,19 @@ public class VisualLifetimeGlobalNPC : GlobalNPC
             npc.noGravity = true;
             npc.velocity = Vector2.Zero;
 
-            // начинаем fade
             npc.alpha = 0;
-
-            // даём время на красивое исчезновение
             lifetime = FadeDuration;
+
+            // присваиваем ник стрекозе
+            if (npc.TryGetGlobalNPC<ViewerButterflyGlobal>(out var butterflyGlobal))
+            {
+                butterflyGlobal.isViewerButterfly = true;
+                butterflyGlobal.viewerName = oldViewerName;
+            }
         }
 
         if (lifetime < -10)
-        {
             npc.active = false;
-        }
     }
 }
 
@@ -317,6 +325,7 @@ public class ViewerButterflyGlobal : GlobalNPC
     public bool isViewerButterfly = false;
     public string viewerName = "";
     public string rawId = "";
+
     public static List<TikFinityClient.SubscriberHistoryEntry> SubscriberHistory = new List<TikFinityClient.SubscriberHistoryEntry>();
 
     public override void AI(NPC npc)
@@ -325,6 +334,7 @@ public class ViewerButterflyGlobal : GlobalNPC
 
         lifetime++;
 
+        // Начинаем fade после 540 тиков (9 секунд)
         if (lifetime > 540)
             npc.alpha = (int)MathHelper.Clamp((lifetime - 540) * 4.25f, 0, 255);
 
@@ -336,11 +346,12 @@ public class ViewerButterflyGlobal : GlobalNPC
     {
         if (!isViewerButterfly || string.IsNullOrEmpty(viewerName)) return;
 
+        // Ник следует за npc.Top и учитывает прозрачность
         Vector2 position = npc.Top - new Vector2(0, 20) - screenPos;
 
         Color nameColor;
 
-        // Проверяем, является ли зритель подписчиком
+        // Цвет по типу зрителя
         if (TikFinityClient.GiftGiverIds.Contains(rawId))
         {
             float hue = (Main.GameUpdateCount % 360) / 360f;
@@ -355,8 +366,33 @@ public class ViewerButterflyGlobal : GlobalNPC
             nameColor = Color.White;
         }
 
-        // Учитываем прозрачность NPC
-        nameColor = nameColor * (1f - npc.alpha / 255f);
+        // Прозрачность текста следует за npc.alpha
+        float alphaMultiplier = 1f - npc.alpha / 255f;
+        nameColor *= alphaMultiplier;
+
+        // Обводка
+        Vector2[] offsets = new Vector2[]
+        {
+            new Vector2(-1, 0),
+            new Vector2(1, 0),
+            new Vector2(0, -1),
+            new Vector2(0, 1)
+        };
+
+        foreach (var o in offsets)
+        {
+            spriteBatch.DrawString(
+                TikFont.Font,
+                viewerName,
+                position + o,
+                Color.Black * alphaMultiplier,
+                0f,
+                Vector2.Zero,
+                0.8f,
+                SpriteEffects.None,
+                0f
+            );
+        }
 
         spriteBatch.DrawString(
             TikFont.Font,
