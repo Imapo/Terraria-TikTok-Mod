@@ -1,3 +1,0 @@
-displayName = Imapo's TikTok Integration Mod
-author = Imapo
-version = 0.2
