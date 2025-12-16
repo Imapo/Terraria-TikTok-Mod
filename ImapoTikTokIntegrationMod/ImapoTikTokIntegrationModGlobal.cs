@@ -326,7 +326,7 @@ public class ViewerButterflyGlobal : GlobalNPC
     public string viewerName = "";
     public string rawId = "";
 
-    public static List<TikFinityClient.SubscriberHistoryEntry> SubscriberHistory = new List<TikFinityClient.SubscriberHistoryEntry>();
+    public static List<TikFinityClient.SubscriberDatabaseEntry> SubscriberDatabase = new List<TikFinityClient.SubscriberDatabaseEntry>();
 
     public override void AI(NPC npc)
     {

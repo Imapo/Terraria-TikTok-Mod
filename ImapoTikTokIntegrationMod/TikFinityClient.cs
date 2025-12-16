@@ -1,39 +1,59 @@
 ﻿// TikFinityClient.cs
+using ImapoTikTokIntegrationMod;
 using Microsoft.Xna.Framework;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net.WebSockets;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Terraria;
 using Terraria.ID;
 using Terraria.ModLoader;
-using System.IO;
-using System.Text.Encodings.Web;
 
 public class TikFinityClient : ModSystem
 {
-    private static readonly string ViewerDatabaseFilePath = Path.Combine(Main.SavePath, "TikFinity_ViewerDatabase.json");
-    private static readonly string SubscriberHistoryFilePath = Path.Combine(Main.SavePath, "TikFinity_SubscriberHistory.json");
-    private static List<SubscriberHistoryEntry> subscriberHistory = new List<SubscriberHistoryEntry>();
+    private static List<SubscriberDatabaseEntry> subscriberDatabase = new List<SubscriberDatabaseEntry>();
     private static ClientWebSocket socket;
     private static CancellationTokenSource cancelToken;
-    private static Dictionary<string, ViewerInfo> viewerDatabase = new Dictionary<string, ViewerInfo>();
     private static HashSet<string> veteranSpawnedThisSession = new HashSet<string>();
     public static HashSet<string> SubscriberIds = new HashSet<string>();
     private const int MAX_VIEWERS = 500;
-    private static readonly string GiftHistoryFilePath =
-    Path.Combine(Main.SavePath, "TikFinity_GiftHistory.json");
-    private static List<GiftHistoryEntry> giftHistory = new();
+    private static List<GiftDatabaseEntry> giftDatabase = new();
     public static HashSet<string> GiftGiverIds = new();
-    private static readonly string ModeratorDatabaseFilePath = Path.Combine(Main.SavePath, "TikFinity_ModeratorDatabase.json");
-    private static Dictionary<string, ModeratorInfo> moderatorDatabase = new Dictionary<string, ModeratorInfo>();
     private static bool _hasLoggedFirstMessage = false;
     private static bool _hasShownStreamerName = false;
     private static Dictionary<string, int> likeComboCounter = new Dictionary<string, int>();
+    private const string ModDataFolderName = "ImapoTikTokIntegrationModBD";
+    private static string GetModDataRoot()
+    {
+        return Path.Combine(Main.SavePath, ModDataFolderName);
+    }
+    private static string CurrentStreamerKey = "default";
+    private static string GetStreamerPath()
+    {
+        string safeName = MakeSafeFolderName(CurrentStreamerKey);
+        return Path.Combine(GetModDataRoot(), safeName);
+    }
+    private static string MakeSafeFolderName(string name)
+    {
+        foreach (char c in Path.GetInvalidFileNameChars())
+            name = name.Replace(c, '_');
+
+        return name.Trim();
+    }
+    private static string ViewerDatabaseFilePath =>
+    Path.Combine(GetStreamerPath(), "ViewerDatabase.json");
+    private static string SubscriberDatabaseFilePath =>
+        Path.Combine(GetStreamerPath(), "SubscriberDatabase.json");
+    private static string GiftDatabaseFilePath =>
+        Path.Combine(GetStreamerPath(), "GiftDatabase.json");
+    private static string ModeratorDatabaseFilePath =>
+        Path.Combine(GetStreamerPath(), "ModeratorDatabase.json");
     // === ОГРАНИЧЕНИЯ НА СПАВН ===
     private static int CountActiveButterflies()
     {
@@ -89,22 +109,9 @@ public class TikFinityClient : ModSystem
         }
         return count;
     }
-    // Проверка по истории дарителей
-    private bool IsFollower(JsonElement root)
+    private static void EnsureStreamerDirectory()
     {
-        if (root.TryGetProperty("isSubscribed", out var sub1) && sub1.ValueKind == JsonValueKind.True)
-            return true;
-
-        if (root.TryGetProperty("isFollower", out var sub2) && sub2.ValueKind == JsonValueKind.True)
-            return true;
-
-        if (root.TryGetProperty("follow", out var sub3) && sub3.ValueKind == JsonValueKind.True)
-            return true;
-
-        if (root.TryGetProperty("event", out var ev) && ev.GetString() == "follow")
-            return true;
-
-        return false;
+        Directory.CreateDirectory(GetStreamerPath());
     }
 
     // -------------------------
@@ -112,9 +119,10 @@ public class TikFinityClient : ModSystem
     // -------------------------
     public override void OnWorldLoad()
     {
-        ImportGiftHistory();
+        ImportGiftDatabase();
         ImportViewerDatabase();
-        ImportSubscriberHistory();
+        ImportSubscriberDatabase();
+        ImportModeratorDatabase();
         StartClient();
     }
 
@@ -222,6 +230,23 @@ public class TikFinityClient : ModSystem
     // -------------------------
     // Основной обработчик сообщений
     // -------------------------
+    private static void SetStreamer(string newStreamer)
+    {
+        newStreamer = MakeSafeFolderName(newStreamer);
+        if (newStreamer == CurrentStreamerKey)
+            return;
+        CurrentStreamerKey = newStreamer;
+        Directory.CreateDirectory(GetStreamerPath());
+        Main.NewText($"[TikFinity] Connected to stream: {newStreamer}", Color.Cyan);
+        _hasShownStreamerName = true;
+
+        // Очистка кэшей текущей сессии
+        ModDataStorage.ViewerDatabase.Clear();
+        ModDataStorage.ModeratorDatabase.Clear();
+        ModDataStorage.SubscriberDatabase.Clear();
+        ModDataStorage.giftDatabase.Clear();
+    }
+
     private void HandleMessage(string json)
     {
         try
@@ -239,8 +264,7 @@ public class TikFinityClient : ModSystem
                     !string.IsNullOrEmpty(streamerNameElem.GetString()))
                 {
                     string streamerName = streamerNameElem.GetString().Trim();
-                    Main.NewText($"[TikFinity] Connected to stream: {streamerName}", Color.Cyan);
-                    _hasShownStreamerName = true;
+                    SetStreamer(streamerName);
                 }
                 else if (root.TryGetProperty("data", out var dataNested) && data.ValueKind == JsonValueKind.Object)
                 {
@@ -248,8 +272,7 @@ public class TikFinityClient : ModSystem
                         !string.IsNullOrEmpty(nameFromData.GetString()))
                     {
                         string streamerName = nameFromData.GetString().Trim();
-                        Main.NewText($"[TikFinity] Connected to stream: {streamerName}", Color.Cyan);
-                        _hasShownStreamerName = true;
+                        SetStreamer(streamerName);
                     }
                 }
             }
@@ -271,6 +294,7 @@ public class TikFinityClient : ModSystem
                 case "member":
                 case "":
                     HandleJoinEvent(key, nickname);
+                    AddOrUpdateViewer(key, nickname, isSubscriber, isModerator, isFollowing, eventType ?? "Unknown");
                     break;
 
                 case "chat":
@@ -283,7 +307,7 @@ public class TikFinityClient : ModSystem
 
                 case "gift":
                     int amount = data.TryGetProperty("coins", out var c) ? c.GetInt32() : 1;
-                    AddGiftHistory(key, nickname, amount);
+                    AddGiftDatabase(key, nickname, amount);
                     SpawnGiftFlyingFish(nickname, amount);
                     break;
 
@@ -399,7 +423,7 @@ public class TikFinityClient : ModSystem
 
         string now = DateTime.Now.ToString("dd.MM.yy HH:mm:ss");
 
-        if (moderatorDatabase.TryGetValue(key, out var existing))
+        if (ModDataStorage.ModeratorDatabase.TryGetValue(key, out var existing))
         {
             existing.Nickname = nickname;
             existing.SourceEvent = sourceEvent;
@@ -408,7 +432,7 @@ public class TikFinityClient : ModSystem
         }
         else
         {
-            moderatorDatabase[key] = new ModeratorInfo
+            ModDataStorage.ModeratorDatabase[key] = new ModeratorInfo
             {
                 Key = key,
                 Nickname = nickname,
@@ -434,11 +458,11 @@ public class TikFinityClient : ModSystem
 
             if (list != null)
             {
-                moderatorDatabase.Clear();
+                ModDataStorage.ModeratorDatabase.Clear();
                 foreach (var m in list)
                 {
                     if (!string.IsNullOrEmpty(m.Key))
-                        moderatorDatabase[m.Key] = m;
+                        ModDataStorage.ModeratorDatabase[m.Key] = m;
                 }
 
                 ModContent.GetInstance<global::ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>()
@@ -457,14 +481,17 @@ public class TikFinityClient : ModSystem
     {
         try
         {
-            var list = moderatorDatabase.Values.ToList();
+            EnsureStreamerDirectory();
+            var list = ModDataStorage.ModeratorDatabase.Values.ToList();
             var options = new JsonSerializerOptions
             {
                 WriteIndented = true,
-                Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+                Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
             };
-            string json = JsonSerializer.Serialize(list, options);
-            File.WriteAllText(ModeratorDatabaseFilePath, json);
+            File.WriteAllText(
+                ModeratorDatabaseFilePath,
+                JsonSerializer.Serialize(list, options)
+            );
         }
         catch (Exception ex)
         {
@@ -473,25 +500,91 @@ public class TikFinityClient : ModSystem
         }
     }
 
-    private static void ImportGiftHistory()
+    public static void ImportGiftDatabase()
     {
-        if (!File.Exists(GiftHistoryFilePath))
-            return;
-
-        var json = File.ReadAllText(GiftHistoryFilePath);
-        var list = JsonSerializer.Deserialize<List<GiftHistoryEntry>>(json);
-
-        if (list != null)
+        try
         {
-            giftHistory = list;
-            RebuildGiftGiverCache();
+            if (!File.Exists(GiftDatabaseFilePath))
+                return;
+
+            string json = File.ReadAllText(GiftDatabaseFilePath);
+            var list = JsonSerializer.Deserialize<List<GiftDatabaseEntry>>(json);
+
+            if (list != null)
+            {
+                ModDataStorage.giftDatabase.Clear();
+                foreach (var g in list)
+                {
+                    if (!string.IsNullOrEmpty(g.Key))
+                        ModDataStorage.giftDatabase[g.Key] = g;
+                }
+                RebuildGiftGiverCache();
+
+                ModContent.GetInstance<global::ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>()
+                    .Logger.Info($"[Tikfinity] Gift database imported from {GiftDatabaseFilePath}");
+            }
+        }
+        catch (Exception ex)
+        {
+            ModContent.GetInstance<global::ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>()
+                .Logger.Info($"[Tikfinity ERROR] Failed to import gift database: {ex}");
         }
     }
 
-
-    private static void AddGiftHistory(string key, string nickname, int coins)
+    public static void UpdateGiftDatabaseJson()
     {
-        giftHistory.Add(new GiftHistoryEntry
+        try
+        {
+            EnsureStreamerDirectory();
+            var list = ModDataStorage.giftDatabase.Values.ToList();
+            var options = new JsonSerializerOptions
+            {
+                WriteIndented = true,
+                Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+            };
+            File.WriteAllText(
+                GiftDatabaseFilePath, 
+                JsonSerializer.Serialize(list, options)
+            );
+        }
+        catch (Exception ex)
+        {
+            ModContent.GetInstance<global::ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>()
+                .Logger.Info($"[Tikfinity ERROR] Failed to update gift JSON: {ex}");
+        }
+    }
+
+    private static void AddOrUpdateGift(string key, string nickname, int coins)
+    {
+        if (string.IsNullOrWhiteSpace(key))
+            return;
+
+        string now = DateTime.Now.ToString("dd.MM.yy HH:mm:ss");
+
+        if (ModDataStorage.giftDatabase.TryGetValue(key, out var existing))
+        {
+            existing.Nickname = nickname;
+            existing.Coins += coins; // аккумулируем монеты
+            existing.Time = now;
+        }
+        else
+        {
+            ModDataStorage.giftDatabase[key] = new GiftDatabaseEntry
+            {
+                Key = key,
+                Nickname = nickname,
+                Coins = coins,
+                Time = now
+            };
+        }
+
+        UpdateGiftDatabaseJson();
+        RebuildGiftGiverCache();
+    }
+
+    private static void AddGiftDatabase(string key, string nickname, int coins)
+    {
+        giftDatabase.Add(new GiftDatabaseEntry
         {
             Key = key,
             Nickname = nickname,
@@ -499,13 +592,9 @@ public class TikFinityClient : ModSystem
             Time = DateTime.Now.ToString("dd.MM.yy HH:mm:ss")
         });
 
-        // ограничим, например, до 300 подарков
-        if (giftHistory.Count > 300)
-            giftHistory.RemoveAt(0);
-
         File.WriteAllText(
-            GiftHistoryFilePath,
-            JsonSerializer.Serialize(giftHistory, new JsonSerializerOptions
+            GiftDatabaseFilePath,
+            JsonSerializer.Serialize(giftDatabase, new JsonSerializerOptions
             {
                 WriteIndented = true,
                 Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
@@ -518,54 +607,55 @@ public class TikFinityClient : ModSystem
     private static void RebuildGiftGiverCache()
     {
         GiftGiverIds.Clear();
-        foreach (var g in giftHistory)
+        foreach (var g in giftDatabase)
         {
             if (!string.IsNullOrEmpty(g.Key))
                 GiftGiverIds.Add(g.Key);
         }
     }
 
-    public class GiftHistoryEntry
+    public class GiftDatabaseEntry
     {
         public string Key { get; set; }
         public string Nickname { get; set; }
         public int Coins { get; set; }
+        public string SourceEvent { get; set; } = "gift";
         public string Time { get; set; }
     }
 
+
     private static void TrimViewerDatabase()
     {
-        if (viewerDatabase.Count <= MAX_VIEWERS)
+        if (ModDataStorage.ViewerDatabase.Count <= MAX_VIEWERS)
             return;
 
-        var ordered = viewerDatabase
+        var ordered = ModDataStorage.ViewerDatabase
             .OrderBy(v =>
-            {
-                if (DateTime.TryParse(v.Value.Time, out var t))
-                    return t;
-                return DateTime.MinValue;
-            })
+                DateTime.TryParse(v.Value.Time, out var t)
+                    ? t
+                    : DateTime.MinValue
+            )
             .ToList();
 
-        int removeCount = viewerDatabase.Count - MAX_VIEWERS;
+        int removeCount = ModDataStorage.ViewerDatabase.Count - MAX_VIEWERS;
 
         for (int i = 0; i < removeCount; i++)
         {
-            viewerDatabase.Remove(ordered[i].Key);
+            ModDataStorage.ViewerDatabase.Remove(ordered[i].Key);
         }
     }
 
     private static void RebuildSubscriberCache()
     {
         SubscriberIds.Clear();
-        foreach (var s in subscriberHistory)
+        foreach (var s in subscriberDatabase)
         {
             if (!string.IsNullOrEmpty(s.Key))
                 SubscriberIds.Add(s.Key);
         }
     }
 
-    public class SubscriberHistoryEntry
+    public class SubscriberDatabaseEntry
     {
         public string Key { get; set; }
         public string Nickname { get; set; }
@@ -575,43 +665,46 @@ public class TikFinityClient : ModSystem
         public string Time { get; set; }
     }
 
-    public static void UpdateSubscriberHistoryJson(SubscriberHistoryEntry entry)
+    public static void UpdateSubscriberDatabaseJson(SubscriberDatabaseEntry entry)
     {
         try
         {
-            subscriberHistory.Add(entry);
+            EnsureStreamerDirectory();
+            subscriberDatabase.Add(entry);
             var options = new JsonSerializerOptions
             {
                 WriteIndented = true,
                 Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
             };
-            string json = JsonSerializer.Serialize(subscriberHistory, options);
-            File.WriteAllText(SubscriberHistoryFilePath, json);
+            File.WriteAllText(
+                SubscriberDatabaseFilePath,
+                JsonSerializer.Serialize(subscriberDatabase, options)
+            );
         }
         catch (Exception ex)
         {
             ModContent.GetInstance<global::ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>()
-                .Logger.Info($"[Tikfinity ERROR] Failed to update subscriber history JSON: {ex}");
+                .Logger.Info($"[Tikfinity ERROR] Failed to update subscriber Database JSON: {ex}");
         }
     }
 
-    public static void ImportSubscriberHistory()
+    public static void ImportSubscriberDatabase()
     {
         try
         {
-            if (!File.Exists(SubscriberHistoryFilePath)) return;
-            string json = File.ReadAllText(SubscriberHistoryFilePath);
-            var list = JsonSerializer.Deserialize<List<SubscriberHistoryEntry>>(json);
+            if (!File.Exists(SubscriberDatabaseFilePath)) return;
+            string json = File.ReadAllText(SubscriberDatabaseFilePath);
+            var list = JsonSerializer.Deserialize<List<SubscriberDatabaseEntry>>(json);
             if (list != null)
             {
-                subscriberHistory = list;
+                subscriberDatabase = list;
                 RebuildSubscriberCache();
             }
         }
         catch (Exception ex)
         {
             ModContent.GetInstance<global::ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>()
-                .Logger.Info($"[Tikfinity ERROR] Failed to import subscriber history: {ex}");
+                .Logger.Info($"[Tikfinity ERROR] Failed to import subscriber Database: {ex}");
         }
     }
 
@@ -637,7 +730,7 @@ public class TikFinityClient : ModSystem
     {
         try
         {
-            var list = viewerDatabase.Values.ToList();
+            var list = ModDataStorage.ViewerDatabase.Values.ToList();
 
             var options = new JsonSerializerOptions
             {
@@ -671,11 +764,11 @@ public class TikFinityClient : ModSystem
 
             if (list != null)
             {
-                viewerDatabase.Clear();
+                ModDataStorage.ViewerDatabase.Clear();
                 foreach (var v in list)
                 {
                     if (!string.IsNullOrEmpty(v.Key))
-                        viewerDatabase[v.Key] = v;
+                        ModDataStorage.ViewerDatabase[v.Key] = v;
                 }
 
                 ModContent.GetInstance<global::ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>().Logger.Info($"[Tikfinity] Viewer database imported from {ViewerDatabaseFilePath}");
@@ -691,14 +784,17 @@ public class TikFinityClient : ModSystem
     {
         try
         {
-            var list = viewerDatabase.Values.ToList();
+            EnsureStreamerDirectory();
+            var list = ModDataStorage.ViewerDatabase.Values.ToList();
             var options = new JsonSerializerOptions
             {
                 WriteIndented = true,
                 Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
             };
-            string json = JsonSerializer.Serialize(list, options);
-            File.WriteAllText(ViewerDatabaseFilePath, json);
+            File.WriteAllText(
+                ViewerDatabaseFilePath,
+                JsonSerializer.Serialize(list, options)
+            );
         }
         catch (Exception ex)
         {
@@ -828,7 +924,7 @@ public class TikFinityClient : ModSystem
         if (string.IsNullOrWhiteSpace(key))
             return;
 
-        if (sourceEvent == "config" || sourceEvent == "Unknown")
+        if (string.IsNullOrWhiteSpace(sourceEvent))
             return;
 
         // ❌ ChatMessage без текста — не пишем
@@ -837,7 +933,7 @@ public class TikFinityClient : ModSystem
 
         string now = DateTime.Now.ToString("dd.MM.yy HH:mm:ss");
 
-        if (viewerDatabase.TryGetValue(key, out var existing))
+        if (ModDataStorage.ViewerDatabase.TryGetValue(key, out var existing))
         {
             existing.Nickname = nickname;
             existing.IsSubscriber = isSubscriber;
@@ -851,7 +947,7 @@ public class TikFinityClient : ModSystem
         }
         else
         {
-            viewerDatabase[key] = new ViewerInfo
+            ModDataStorage.ViewerDatabase[key] = new ViewerInfo
             {
                 Key = key,
                 Nickname = nickname,
@@ -895,7 +991,7 @@ public class TikFinityClient : ModSystem
         // 3️⃣ остальная логика не меняется
         if (isFollowing && !SubscriberIds.Contains(key))
         {
-            var entry = new SubscriberHistoryEntry
+            var entry = new SubscriberDatabaseEntry
             {
                 Key = key,
                 Nickname = nickname,
@@ -904,7 +1000,7 @@ public class TikFinityClient : ModSystem
                 Time = DateTime.Now.ToString("dd.MM.yy HH:mm:ss")
             };
 
-            UpdateSubscriberHistoryJson(entry);
+            UpdateSubscriberDatabaseJson(entry);
             RebuildSubscriberCache();
         }
 
@@ -919,11 +1015,9 @@ public class TikFinityClient : ModSystem
     private void HandleSubscribeEvent(string key, string nickname, bool isModerator, bool isFollowing)
     {
         AddOrUpdateViewer(key, nickname, true, isModerator, isFollowing, "Subscribe");
-
         SpawnSubscriberSlime(nickname);
-
         // --- записываем в историю ---
-        var entry = new SubscriberHistoryEntry
+        var entry = new SubscriberDatabaseEntry
         {
             Key = key,
             Nickname = nickname,
@@ -931,7 +1025,7 @@ public class TikFinityClient : ModSystem
             EventType = "subscribe",
             Time = DateTime.Now.ToString("dd.MM.yy HH:mm:ss")
         };
-        UpdateSubscriberHistoryJson(entry);
+        UpdateSubscriberDatabaseJson(entry);
         RebuildSubscriberCache();
     }
 
@@ -951,7 +1045,7 @@ public class TikFinityClient : ModSystem
         }
 
         // 🔥 если пользователь — модератор — спавним огненного слизня
-        if (moderatorDatabase.ContainsKey(key))
+        if (ModDataStorage.ModeratorDatabase.ContainsKey(key))
         {
             SpawnModeratorSlime(nickname);
         }
@@ -1213,6 +1307,8 @@ public class TikFinityClient : ModSystem
 
                 npc.netUpdate = true;
             }
+
+            Main.NewText($"[Подарок] от {nickname}!", 230, 10, 0);
         });
     }
 
