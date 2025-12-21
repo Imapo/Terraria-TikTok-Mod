@@ -296,6 +296,28 @@ public class TikFinityClient : ModSystem
                 case "":
                     HandleJoinEvent(key, nickname);
                     AddOrUpdateViewer(key, nickname, isSubscriber, isModerator, isFollowing, eventType ?? "Unknown");
+                    if (platform == "youtube")
+                    {
+                        Main.QueueMainThreadAction(() =>
+                        {
+                            string messageText = ExtractCommentText(data);
+                            if (!string.IsNullOrWhiteSpace(messageText))
+                            {
+                                // Вывод в чат
+                                string chatMessage = $"[YouTube] {nickname}: {messageText}";
+                                if (Main.netMode == NetmodeID.SinglePlayer)
+                                    Main.NewText(chatMessage, 255, 255, 0);
+                                else if (Main.netMode == NetmodeID.Server)
+                                    Terraria.Chat.ChatHelper.BroadcastChatMessage(
+                                        Terraria.Localization.NetworkText.FromLiteral(chatMessage),
+                                        new Color(255, 255, 0)
+                                    );
+
+                                // Спавн Firefly (аналог TikTok)
+                                SpawnCommentFirefly(nickname, messageText);
+                            }
+                        });
+                    }
                     break;
 
                 case "chat":
@@ -852,7 +874,7 @@ public class TikFinityClient : ModSystem
         }
 
         if (!string.IsNullOrEmpty(nickname) && nickname.Length > 20)
-            nickname = nickname.Substring(0, 17) + "...";
+            nickname = nickname.Substring(0, 27) + "...";
 
         return nickname;
     }
@@ -1097,8 +1119,8 @@ public class TikFinityClient : ModSystem
                 text = contentProp.GetString().Trim();
         }
 
-        if (text.Length > 50)
-            text = text.Substring(0, 47) + "...";
+        //if (text.Length > 50)
+            //text = text.Substring(0, 47) + "...";
 
         return text;
     }
