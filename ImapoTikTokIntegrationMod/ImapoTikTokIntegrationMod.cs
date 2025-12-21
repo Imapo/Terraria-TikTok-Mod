@@ -7,7 +7,6 @@ namespace ImapoTikTokIntegrationMod
         public override void Load()
         {
             Logger.Info("ImapoTikTokIntegrationMod загружен");
-            TikFont.Load(this);
         }
 
         public override void Unload()

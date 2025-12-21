@@ -9,41 +9,10 @@ using Terraria.GameContent;
 using Terraria.ID;
 using Terraria.ModLoader;
 
-public static class TikFont
+
+public static class Fonts
 {
-    public static DynamicSpriteFont Font;
-
-    public static void Load(Mod mod)
-    {
-        // ✅ Никогда не загружаем шрифты на сервере
-        if (Main.dedServ)
-            return;
-
-        try
-        {
-            // ✅ Строго через ModContent + имя мода
-            Font = ModContent.Request<DynamicSpriteFont>(
-                "Assets/Fonts/NotoColorEmoji",
-                ReLogic.Content.AssetRequestMode.ImmediateLoad
-            ).Value;
-
-            if (Font == null)
-                throw new System.Exception("Font == null after load");
-
-            Main.NewText("✅ Unicode шрифт загружен", Color.LimeGreen);
-        }
-        catch (System.Exception e)
-        {
-            // ✅ Фолбэк на стандартный
-            Font = FontAssets.MouseText.Value;
-
-            // ❗ ВАЖНО: Main.NewText в Load иногда даёт NullReference
-            if (Main.gameMenu == false)
-                Main.NewText("⚠ Unicode шрифт не загружен, использован стандартный", Color.OrangeRed);
-
-            mod.Logger.Error("Ошибка загрузки Unicode.ttf:\n" + e);
-        }
-    }
+    public static DynamicSpriteFont DefaultFont => FontAssets.MouseText.Value;
 }
 
 public class VisualLifetimeGlobalNPC : GlobalNPC
@@ -310,9 +279,9 @@ public class ViewerSlimesGlobal : GlobalNPC
 
         // Обводка
         foreach (var o in new[] { new Vector2(-1, 0), new Vector2(1, 0), new Vector2(0, -1), new Vector2(0, 1) })
-            spriteBatch.DrawString(TikFont.Font, name, pos + o, Color.Black, 0f, Vector2.Zero, scale, SpriteEffects.None, 0f);
+            spriteBatch.DrawString(Fonts.DefaultFont, name, pos + o, Color.Black, 0f, Vector2.Zero, scale, SpriteEffects.None, 0f);
 
-        spriteBatch.DrawString(TikFont.Font, name, pos, color, 0f, Vector2.Zero, scale, SpriteEffects.None, 0f);
+        spriteBatch.DrawString(Fonts.DefaultFont, name, pos, color, 0f, Vector2.Zero, scale, SpriteEffects.None, 0f);
     }
 }
 
@@ -382,7 +351,7 @@ public class ViewerButterflyGlobal : GlobalNPC
         foreach (var o in offsets)
         {
             spriteBatch.DrawString(
-                TikFont.Font,
+                Fonts.DefaultFont,
                 viewerName,
                 position + o,
                 Color.Black * alphaMultiplier,
@@ -395,7 +364,7 @@ public class ViewerButterflyGlobal : GlobalNPC
         }
 
         spriteBatch.DrawString(
-            TikFont.Font,
+            Fonts.DefaultFont,
             viewerName,
             position,
             nameColor,
@@ -469,7 +438,7 @@ public class ViewerFireflyGlobal : GlobalNPC
             textColor *= 1f - npc.alpha / 255f;
 
         spriteBatch.DrawString(
-            TikFont.Font,
+            Fonts.DefaultFont,
             text,
             position,
             textColor,
@@ -496,7 +465,7 @@ public class GiftFlyingFishGlobal : GlobalNPC
         Vector2 position = npc.Top - new Vector2(0, 20) - screenPos;
 
         spriteBatch.DrawString(
-            TikFont.Font,
+            Fonts.DefaultFont,
             $"🎁 {giverName}",
             position,
             Color.Gold,
@@ -595,9 +564,9 @@ public class LikeFloatingTextGlobal : GlobalNPC
         };
 
         foreach (var o in offsets)
-            spriteBatch.DrawString(TikFont.Font, text, pos + o, outlineColor, 0f, Vector2.Zero, 0.6f, SpriteEffects.None, 0f);
+            spriteBatch.DrawString(Fonts.DefaultFont, text, pos + o, outlineColor, 0f, Vector2.Zero, 0.6f, SpriteEffects.None, 0f);
 
-        spriteBatch.DrawString(TikFont.Font, text, pos, mainColor, 0f, Vector2.Zero, 0.6f, SpriteEffects.None, 0f);
+        spriteBatch.DrawString(Fonts.DefaultFont, text, pos, mainColor, 0f, Vector2.Zero, 0.6f, SpriteEffects.None, 0f);
     }
 }
 

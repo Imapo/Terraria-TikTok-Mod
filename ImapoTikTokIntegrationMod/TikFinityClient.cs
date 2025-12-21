@@ -254,6 +254,7 @@ public class TikFinityClient : ModSystem
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
 
+            string platform = root.GetProperty("platform").GetString();
             string eventType = root.TryGetProperty("event", out var ev) ? ev.GetString() : "";
             JsonElement data = root.TryGetProperty("data", out var d) ? d : root;
 
