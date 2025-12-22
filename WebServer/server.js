@@ -129,6 +129,11 @@ async function main() {
     const twitchSeen = new Set();
     await twitch.connect();
     console.log('✅ Twitch Chat connected');
+    emit('chat', 'twitch', {
+        userId: `system`,
+        nickname: `Twitch`,
+        text: `Connected`
+      });
 
     twitch.on('message', (_, tags, msg, self) => {
       if (self) return;
@@ -161,11 +166,16 @@ async function main() {
       emit('chat', 'twitch', {
         userId: raider.username,
         nickname: formatNickname('twitch', raider.username),
-        text: `[РЕЙД] ${raider.viewers} viewers`
+        text: `[РЕЙД] ${raider.viewers} зрителей`
       })
     );
   } catch (err) {
     console.error('⚠ Twitch connection failed:', err.message);
+    emit('chat', 'twitch', {
+        userId: `system`,
+        nickname: `Twitch`,
+        text: `⚠ Twitch connection failed: ${err.message}`
+      });
   }
 
   /* ---------- TikTok ---------- */
@@ -173,6 +183,11 @@ async function main() {
     const tt = new TikTokLiveConnection(TIKTOK_USERNAME);
     await tt.connect();
     console.log('✅ TikTok connected');
+    emit('chat', 'tiktok', {
+        userId: `system`,
+        nickname: `TikTok`,
+        text: `Connected`
+      });
 
     tt.on(WebcastEvent.MEMBER, d =>
       emit('join', 'tiktok', {
@@ -227,6 +242,12 @@ async function main() {
     );
   } catch (err) {
     console.error('⚠ TikTok connection failed:', err.message);
+    emit('chat', 'tiktok', {
+        userId: `system`,
+        nickname: `TikTok`,
+        text: `⚠ TikTok connection failed: ${err.message}`
+      });
+
   }
 
   /* ---------- YouTube Chat ---------- */
@@ -234,9 +255,30 @@ async function main() {
     const yt = new LiveChat({ channelId: YT_CHANNEL_ID });
     const ytSeen = new Set();
 
-    yt.on('start', () => console.log('✅ YouTube Live Chat started'));
-    yt.on('end', () => console.log('❌ YouTube Live Chat ended'));
-    yt.on('error', err => console.error('⚠ YouTube error:', err));
+    yt.on('start', () => {
+        console.log('✅ YouTube Live Chat started');
+        emit('chat', 'youtube', {
+            userId: `system`,
+            nickname: `YouTube`,
+            text: `✅ YouTube Live Chat started`
+          });
+    });
+    yt.on('end', () => {
+        console.log('❌ YouTube Live Chat ended');
+        emit('chat', 'youtube', {
+            userId: `system`,
+            nickname: `YouTube`,
+            text: `❌ YouTube Live Chat ended`
+          });
+    });
+    yt.on('error', err => {
+        console.error('⚠ YouTube error:', err);
+        emit('chat', 'youtube', {
+            userId: `system`,
+            nickname: `YouTube`,
+            text: `⚠ YouTube error: ${err}`
+          });
+    });
 
     yt.on('chat', chatItem => {
       const userId = chatItem.author.channelId;
@@ -278,6 +320,12 @@ async function main() {
     await yt.start();
   } catch (err) {
     console.error('⚠ YouTube connection failed:', err.message);
+    emit('chat', 'youtube', {
+        userId: `system`,
+        nickname: `YouTube`,
+        text: `⚠ YouTube connection failed`
+      });
+
   }
 
 }
