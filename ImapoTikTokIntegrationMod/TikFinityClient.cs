@@ -339,6 +339,7 @@ public class TikFinityClient : ModSystem
                     break;
 
                 case "share":
+                case "subscribe":
                     HandleShareEvent(key, nickname, isModerator, isFollowing);
                     break;
 
@@ -566,7 +567,7 @@ public class TikFinityClient : ModSystem
                 Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
             };
             File.WriteAllText(
-                GiftDatabaseFilePath, 
+                GiftDatabaseFilePath,
                 JsonSerializer.Serialize(list, options)
             );
         }
@@ -1120,7 +1121,7 @@ public class TikFinityClient : ModSystem
         }
 
         //if (text.Length > 50)
-            //text = text.Substring(0, 47) + "...";
+        //text = text.Substring(0, 47) + "...";
 
         return text;
     }
@@ -1370,7 +1371,7 @@ public class TikFinityClient : ModSystem
                 var lifetime = npc.GetGlobalNPC<VisualLifetimeGlobalNPC>();
                 lifetime.SetLifetime(60); // 60 сек
                 npc.netUpdate = true;
-                
+
             }
 
             Main.NewText($"[Новый подписчик] {nickname}!", 255, 10, 100);
