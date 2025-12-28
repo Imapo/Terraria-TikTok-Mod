@@ -1,5 +1,6 @@
 // server.js — TikTok + Twitch + YouTube → Terraria (FINAL)
 
+import open from 'open';
 import WebSocket from 'ws';
 import tmi from 'tmi.js';
 import express from 'express';
@@ -7,6 +8,8 @@ import crypto from 'crypto';
 import * as dotenv from 'dotenv';
 import { TikTokLiveConnection, WebcastEvent } from 'tiktok-live-connector';
 import { LiveChat } from 'youtube-chat';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 dotenv.config();
 
@@ -20,30 +23,46 @@ const TIKTOK_USERNAME = process.env.TIKTOK_USERNAME;
 const YT_CHANNEL_ID = process.env.YT_CHANNEL_ID; // правильный YouTube channel ID
 console.log('Connecting to YouTube channel:', YT_CHANNEL_ID);
 const EVENTSUB_SECRET = 'terramodsecret123';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const app = express();
+let wss;
+const tiktokLikes = new Map();
+
+
+// Статические файлы
+app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.json());
+app.listen(3000, () => {
+  console.log('🌐 HTTP → :3000');
+  open('http://localhost:3000/yt-obs-debug.html');
+});
 
 /* =======================
 WEBSOCKET → TERRARIA
 ======================= */
 
-let wss;
-
 function broadcast(event) {
-if (!wss) return;
-const msg = JSON.stringify(event);
-wss.clients.forEach(c => c.readyState === WebSocket.OPEN && c.send(msg));
+    if (!wss) return;
+    const msg = JSON.stringify(event);
+    wss.clients.forEach(c => c.readyState === WebSocket.OPEN && c.send(msg));
 }
 
 function emit(event, platform, data = {}) {
-broadcast({ event, platform, data });
+    broadcast({ event, platform, data });
 }
 
-function formatNickname(platform, nickname) {
-switch (platform) {
-case 'tiktok': return `[TikTok] ${nickname}`;
-case 'youtube': return `[YouTube] ${nickname}`;
-case 'twitch': return `[Twitch] ${nickname}`;
-default: return nickname;
-}
+function formatNickname(platform, nickname, userId = null) {
+  if (platform === 'tiktok' && userId && tiktokLikes.has(userId)) {
+    return `[TikTok] ${nickname} ❤️×${tiktokLikes.get(userId)}`;
+  }
+
+  switch (platform) {
+    case 'tiktok': return `[TikTok] ${nickname}`;
+    case 'youtube': return `[YouTube] ${nickname}`;
+    case 'twitch': return `[Twitch] ${nickname}`;
+    default: return nickname;
+  }
 }
 
 /* =======================
@@ -51,16 +70,14 @@ TWITCH EVENTSUB
 ======================= */
 
 function verifyTwitchSignature(req) {
-const message =
-req.get('Twitch-Eventsub-Message-Id') +
-req.get('Twitch-Eventsub-Message-Timestamp') +
-JSON.stringify(req.body);
-
-const expected =
-'sha256=' +
-crypto.createHmac('sha256', EVENTSUB_SECRET).update(message).digest('hex');
-
-return expected === req.get('Twitch-Eventsub-Message-Signature');
+    const message =
+    req.get('Twitch-Eventsub-Message-Id') +
+    req.get('Twitch-Eventsub-Message-Timestamp') +
+    JSON.stringify(req.body);
+    const expected =
+    'sha256=' +
+    crypto.createHmac('sha256', EVENTSUB_SECRET).update(message).digest('hex');
+    return expected === req.get('Twitch-Eventsub-Message-Signature');
 }
 
 /* =======================
@@ -70,8 +87,8 @@ MAIN
 async function main() {
 
   /* ---------- WS → Terraria ---------- */
-  wss = new WebSocket.Server({ port: 21213 });
-  console.log('✅ Terraria WS → ws://localhost:21213');
+  wss = new WebSocket.Server({ port: 21214 });
+  console.log('✅ Terraria WS → ws://localhost:21214');
 
   /* ---------- HTTP (Twitch EventSub) ---------- */
   const app = express();
@@ -116,8 +133,6 @@ async function main() {
 
     res.status(200).end();
   });
-
-  app.listen(3000, () => console.log('🌐 HTTP → :3000'));
 
   /* ---------- Twitch Chat ---------- */
   try {
@@ -180,7 +195,9 @@ async function main() {
 
   /* ---------- TikTok ---------- */
   try {
-    const tt = new TikTokLiveConnection(TIKTOK_USERNAME);
+    const tt = new TikTokLiveConnection(TIKTOK_USERNAME, {
+      enableExtendedGiftInfo: true
+    });
     await tt.connect();
     console.log('✅ TikTok connected');
     emit('chat', 'tiktok', {
@@ -189,57 +206,99 @@ async function main() {
         text: `Connected`
       });
 
-    tt.on(WebcastEvent.MEMBER, d =>
+    tt.on(WebcastEvent.MEMBER, d => {
+        if (!tiktokLikes.has(d.user.userId)) {
+            tiktokLikes.set(d.user.userId, 0);
+        }
       emit('join', 'tiktok', {
         userId: d.user.userId,
-        nickname: formatNickname('tiktok', d.user.nickname)
+        nickname: formatNickname('tiktok', d.user.nickname, d.user.userId)
       })
-    );
+    });
 
-    tt.on(WebcastEvent.CHAT, d =>
+    tt.on(WebcastEvent.CHAT, d => {
+        if (!tiktokLikes.has(d.user.userId)) {
+            tiktokLikes.set(d.user.userId, 0);
+        }
       emit('chat', 'tiktok', {
         userId: d.user.userId,
-        nickname: formatNickname('tiktok', d.user.nickname),
+        nickname: formatNickname('tiktok', d.user.nickname, d.user.userId),
         text: d.comment
       })
-    );
+    });
 
-    tt.on(WebcastEvent.GIFT, d =>
+    tt.on(WebcastEvent.GIFT, d => {
+      const userId = d.user.userId;
+      const baseName = d.user.nickname;
+      // Основные источники: giftDetails + extendedGiftInfo
+      const giftName =
+        d.giftDetails?.giftName ||
+        d.extendedGiftInfo?.name ||
+        'Подарок';
+      // Иконка подарка — строим полный URL
+      let giftIconUri =
+        d.giftDetails?.icon?.uri ||
+        d.extendedGiftInfo?.icon?.uri ||
+        null;
+      // TikTok CDN требует базовый URL
+      const giftIcon = giftIconUri
+        ? `https://p16-webcast.tiktokcdn.com/img/maliva/${giftIconUri}` + `~tplv-obj.webp`
+        : null;
+      // Добавляем пользователя в Map лайков, если ещё нет
+      if (!tiktokLikes.has(userId)) tiktokLikes.set(userId, 0);
+      // Отправляем через WebSocket
       emit('gift', 'tiktok', {
-        userId: d.user.userId,
-        nickname: formatNickname('tiktok', d.user.nickname),
-        amount: d.gift.diamondCount
-      })
-    );
+        userId,
+        nickname: formatNickname('tiktok', baseName, userId),
+        gift: {
+          name: giftName,
+          icon: giftIcon
+        },
+        amount: d.repeatCount || 1
+      });
+    });
 
-    tt.on(WebcastEvent.LIKE, d =>
+    tt.on(WebcastEvent.LIKE, d => {
+      const userId = d.user.userId;
+      const prev = tiktokLikes.get(userId) || 0;
+      const total = prev + d.likeCount;
+      tiktokLikes.set(userId, total);
       emit('like', 'tiktok', {
-        userId: d.user.userId,
-        nickname: formatNickname('tiktok', d.user.nickname),
+        userId,
+        nickname: d.user.nickname,
         amount: d.likeCount
-      })
-    );
+      });
+    });
 
-    tt.on(WebcastEvent.FOLLOW, d =>
+    tt.on(WebcastEvent.FOLLOW, d => {
+        if (!tiktokLikes.has(d.user.userId)) {
+            tiktokLikes.set(d.user.userId, 0);
+        }
       emit('follow', 'tiktok', {
         userId: d.user.userId,
-        nickname: formatNickname('tiktok', d.user.nickname)
+        nickname: formatNickname('tiktok', d.user.nickname, d.user.userId)
       })
-    );
+    });
 
-    tt.on(WebcastEvent.SHARE, d =>
+    tt.on(WebcastEvent.SHARE, d => {
+        if (!tiktokLikes.has(d.user.userId)) {
+            tiktokLikes.set(d.user.userId, 0);
+        }
       emit('share', 'tiktok', {
         userId: d.user.userId,
-        nickname: formatNickname('tiktok', d.user.nickname)
+        nickname: formatNickname('tiktok', d.user.nickname, d.user.userId)
       })
-    );
+    });
 
-    tt.on(WebcastEvent.SUBSCRIBE, d =>
+    tt.on(WebcastEvent.SUBSCRIBE, d => {
+        if (!tiktokLikes.has(d.user.userId)) {
+            tiktokLikes.set(d.user.userId, 0);
+        }
       emit('subscribe', 'tiktok', {
         userId: d.user.userId,
-        nickname: formatNickname('tiktok', d.user.nickname)
+        nickname: formatNickname('tiktok', d.user.nickname, d.user.userId)
       })
-    );
+    });
   } catch (err) {
     console.error('⚠ TikTok connection failed:', err.message);
     emit('chat', 'tiktok', {
