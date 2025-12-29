@@ -17,8 +17,6 @@ namespace ImapoTikTokIntegrationMod
         private static readonly int[] Tier1Enemies = { 
             NPCID.EaterofSouls,
             NPCID.MotherSlime,
-            NPCID.MeteorHead,
-            NPCID.FireImp,
             NPCID.AngryBones,
             NPCID.CaveBat,
             NPCID.JungleBat,
@@ -28,8 +26,6 @@ namespace ImapoTikTokIntegrationMod
             NPCID.Antlion,
             NPCID.SpikeBall,
             NPCID.GoblinScout,
-            NPCID.Pixie,
-            NPCID.AnglerFish,
             NPCID.ToxicSludge,
             NPCID.SnowBalla,
             NPCID.IceSlime,
@@ -40,11 +36,6 @@ namespace ImapoTikTokIntegrationMod
             NPCID.CyanBeetle,
             NPCID.LacBeetle,
             NPCID.SeaSnail,
-            NPCID.HornetFatty,
-            NPCID.HornetHoney,
-            NPCID.HornetLeafy,
-            NPCID.HornetSpikey,
-            NPCID.HornetStingy,
             NPCID.Raven,
             NPCID.SlimeMasked,
             NPCID.SlimeRibbonWhite,
@@ -56,26 +47,29 @@ namespace ImapoTikTokIntegrationMod
             NPCID.LarvaeAntlion,
             NPCID.Dandelion,
             NPCID.ShimmerSlime,
-            NPCID.SandSlime
+            NPCID.SandSlime,
         };
-        private static readonly int[] Tier2Enemies = { 
+        private static readonly int[] Tier2Enemies = {
+            NPCID.HornetFatty,
+            NPCID.HornetHoney,
+            NPCID.HornetLeafy,
+            NPCID.HornetSpikey,
+            NPCID.HornetStingy,
+            NPCID.AnglerFish,
+            NPCID.Pixie,
+            NPCID.FireImp,
+            NPCID.MeteorHead,
             NPCID.CursedSkull,
             NPCID.Tim,
             NPCID.CorruptBunny,
             NPCID.Harpy,
             NPCID.GiantBat,
-            NPCID.Corruptor,
             NPCID.Slimer,
-            NPCID.Gastropod,
             NPCID.SnowmanGangsta,
             NPCID.MisterStabby,
             NPCID.Lavabat,
             NPCID.Wolf,
             NPCID.SwampThing,
-            NPCID.IceElemental,
-            NPCID.PigronCorruption,
-            NPCID.PigronHallow,
-            NPCID.PigronCrimson,
             NPCID.FaceMonster,
             NPCID.FloatyGross,
             NPCID.Crimslime,
@@ -84,7 +78,6 @@ namespace ImapoTikTokIntegrationMod
             NPCID.SpikedJungleSlime,
             NPCID.HoppinJack,
             NPCID.Ghost,
-            NPCID.MartianTurret,
             NPCID.CrimsonBunny,
             NPCID.GiantShelly,
             NPCID.GiantShelly2,
@@ -98,9 +91,16 @@ namespace ImapoTikTokIntegrationMod
             NPCID.DD2SkeletonT1,
             NPCID.WalkingAntlion,
             NPCID.FlyingAntlion,
-            NPCID.SporeBat
+            NPCID.SporeBat,
         };
-        private static readonly int[] Tier3Enemies = { 
+        private static readonly int[] Tier3Enemies = {
+            NPCID.MartianTurret,
+            NPCID.PigronCorruption,
+            NPCID.PigronHallow,
+            NPCID.PigronCrimson,
+            NPCID.Gastropod,
+            NPCID.Corruptor,
+            NPCID.IceElemental,
             NPCID.Demon,
             NPCID.VoodooDemon,
             NPCID.ArmoredSkeleton,
@@ -170,7 +170,7 @@ namespace ImapoTikTokIntegrationMod
             NPCID.BloodMummy,
             NPCID.QueenSlimeMinionBlue,
             NPCID.QueenSlimeMinionPink,
-            NPCID.QueenSlimeMinionPurple
+            NPCID.QueenSlimeMinionPurple,
         };
         private static readonly int[] Tier4Enemies = { 
             NPCID.DungeonGuardian,
@@ -210,7 +210,7 @@ namespace ImapoTikTokIntegrationMod
             NPCID.DD2DrakinT3,
             NPCID.IceMimic,
             NPCID.RockGolem,
-            NPCID.PirateGhost
+            NPCID.PirateGhost,
         };
         private static readonly int[] Tier5Enemies = { 
             NPCID.CultistBoss,
@@ -227,7 +227,7 @@ namespace ImapoTikTokIntegrationMod
             NPCID.DD2OgreT3,
             NPCID.DD2LightningBugT3,
             NPCID.HallowBoss,
-            NPCID.QueenSlimeBoss
+            NPCID.QueenSlimeBoss,
         };
 
         // ================================
