@@ -9,7 +9,6 @@ using Terraria.GameContent;
 using Terraria.ID;
 using Terraria.ModLoader;
 
-
 public static class Fonts
 {
     public static DynamicSpriteFont DefaultFont => FontAssets.MouseText.Value;
@@ -455,12 +454,15 @@ public class GiftFlyingFishGlobal : GlobalNPC
 {
     public override bool InstancePerEntity => true;
 
+    // ====== ДАННЫЕ ПОДАРКА ======
     public string giverName = "";
     public int goldInside = 0;
 
+    // ====== ОТРИСОВКА НИКА ======
     public override void PostDraw(NPC npc, SpriteBatch spriteBatch, Vector2 screenPos, Color drawColor)
     {
-        if (string.IsNullOrEmpty(giverName)) return;
+        if (string.IsNullOrEmpty(giverName))
+            return;
 
         Vector2 position = npc.Top - new Vector2(0, 20) - screenPos;
 
@@ -477,11 +479,15 @@ public class GiftFlyingFishGlobal : GlobalNPC
         );
     }
 
+    // ====== НАГРАДА ПРИ СМЕРТИ ======
     public override void OnKill(NPC npc)
     {
-        if (goldInside <= 0) return;
+        if (goldInside <= 0)
+            return;
 
-        for (int i = 0; i < goldInside; i++)
+        int coins = Utils.Clamp(goldInside, 1, 50); // защита от спама
+
+        for (int i = 0; i < coins; i++)
         {
             Item.NewItem(
                 npc.GetSource_Loot(),

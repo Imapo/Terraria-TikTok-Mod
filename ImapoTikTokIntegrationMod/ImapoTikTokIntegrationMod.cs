@@ -14,4 +14,32 @@ namespace ImapoTikTokIntegrationMod
             Logger.Info("ImapoTikTokIntegrationMod выгружен");
         }
     }
+
+    public class TikGiftEvent
+    {
+        public string UserName;
+        public int RepeatCount;
+    }
+
+    public class TikShareEvent
+    {
+        public string UserId;
+        public string UserName;
+        public bool isModerator;
+        public bool isFollowing;
+    }
+
+    public class TikSubscribeEvent
+    {
+        public string UserId;
+        public string UserName;
+        public bool isModerator;
+        public bool isFollowing;
+    }
+
+    public class TikJoinEvent
+    {
+        public string UserId;
+        public string UserName;
+    }
 }
