@@ -327,9 +327,22 @@ public class TikFinityClient : ModSystem
                     break;
 
                 case "gift":
-                    int amount = data.TryGetProperty("coins", out var c) ? c.GetInt32() : 1;
-                    AddGiftDatabase(key, nickname, amount);
-                    GiftEnemySpawner.SpawnGiftEnemy(nickname, amount);
+                    int giftCount = 1;
+                    int giftPrice = 1;
+
+                    if (data.TryGetProperty("repeatCount", out var rc) && rc.ValueKind == JsonValueKind.Number)
+                        giftCount = rc.GetInt32();
+
+                    if (data.TryGetProperty("gift", out var giftElem)
+                        && giftElem.ValueKind == JsonValueKind.Object
+                        && giftElem.TryGetProperty("diamondCount", out var dc)
+                        && dc.ValueKind == JsonValueKind.Number)
+                    {
+                        giftPrice = dc.GetInt32();
+                    }
+
+                    AddGiftDatabase(key, nickname, giftCount);
+                    GiftEnemySpawner.SpawnGiftEnemy(nickname, giftCount, giftPrice);
                     break;
 
                 case "follow":
@@ -1503,16 +1516,17 @@ public class TikFinityClient : ModSystem
 
     #region TEST METHODS
 
-    public static void TestGift(int giftId = 5655, int count = 1)
+    public static void TestGift(int count = 1, int diamonds = 1)
     {
         var fakeGift = new TikGiftEvent
         {
             UserName = TikTestFactory.RandomName(),
-            RepeatCount = count
+            RepeatCount = count,
+            DiamondCount = diamonds
         };
         for (int i = 0; i < count; i++)
         {
-            GiftEnemySpawner.SpawnGiftEnemy(fakeGift.UserName, 1);
+            GiftEnemySpawner.SpawnGiftEnemy(fakeGift.UserName, fakeGift.RepeatCount, fakeGift.DiamondCount);
         }
         Main.NewText($"[TEST] Gift x{count} от {fakeGift.UserName}", Color.Gold);
     }

@@ -20,6 +20,7 @@ namespace ImapoTikTokIntegrationMod
     {
         public string UserName;
         public int RepeatCount;
+        public int DiamondCount;
     }
 
     public class TikShareEvent

@@ -22,7 +22,8 @@ namespace ImapoTikTokIntegrationMod
             {
                 case "gift":
                     int giftCount = args.Length > 1 ? int.Parse(args[1]) : 1;
-                    TikFinityClient.TestGift(count: giftCount);
+                    int giftPrice = args.Length > 2 ? int.Parse(args[2]) : 1; // если указано, берём третий аргумент
+                    TikFinityClient.TestGift(count: giftCount, diamonds: giftPrice);
                     break;
 
                 case "share":

@@ -480,14 +480,13 @@ public class GiftFlyingFishGlobal : GlobalNPC
     }
 
     // ====== НАГРАДА ПРИ СМЕРТИ ======
+    public static event System.Action OnGiftEnemyKilled;
     public override void OnKill(NPC npc)
     {
         if (goldInside <= 0)
             return;
 
-        int coins = Utils.Clamp(goldInside, 1, 50); // защита от спама
-
-        for (int i = 0; i < coins; i++)
+        for (int i = 0; i < goldInside; i++)
         {
             Item.NewItem(
                 npc.GetSource_Loot(),
@@ -495,6 +494,9 @@ public class GiftFlyingFishGlobal : GlobalNPC
                 ItemID.GoldCoin
             );
         }
+
+        // уведомляем очередь
+        OnGiftEnemyKilled?.Invoke();
     }
 }
 
