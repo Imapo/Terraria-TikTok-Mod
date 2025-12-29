@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Terraria.ModLoader;
 
 namespace ImapoTikTokIntegrationMod
@@ -41,5 +42,10 @@ namespace ImapoTikTokIntegrationMod
     {
         public string UserId;
         public string UserName;
+    }
+
+    public class TikLikeEvent
+    {
+        public int count;
     }
 }

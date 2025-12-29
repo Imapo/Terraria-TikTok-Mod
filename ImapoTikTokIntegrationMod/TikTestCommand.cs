@@ -33,6 +33,11 @@ namespace ImapoTikTokIntegrationMod
                     TikFinityClient.TestSubscribe();
                     break;
 
+                case "like":
+                    int likes = args.Length > 1 ? int.Parse(args[1]) : 10;
+                    TikFinityClient.TestLike(likes);
+                    break;
+
                 case "join":
                     if (args.Length > 1 && args[1] == "mod")
                         TikFinityClient.TestModeratorJoin();

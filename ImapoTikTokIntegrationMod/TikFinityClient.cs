@@ -1140,19 +1140,14 @@ public class TikFinityClient : ModSystem
             .Replace("👍", "+");
     }
 
-    private void ProcessLikeEvent(JsonElement root, string nickname)
+    private static void HandleLike(string viewerKey, string nickname, int likeIncrement)
     {
-        int likeIncrement = 1;
-        if (root.TryGetProperty("count", out var countProp) && countProp.ValueKind == JsonValueKind.Number)
-            likeIncrement = countProp.GetInt32();
-
-        string viewerKey = ExtractViewerKey(root);
         if (string.IsNullOrEmpty(viewerKey))
             return;
 
         string cleanName = NickSanitizer.Sanitize(nickname);
 
-        // 🔥 Обновляем глобальный счётчик комбо за сессию
+        // 🔥 комбо
         if (likeComboCounter.ContainsKey(viewerKey))
             likeComboCounter[viewerKey] += likeIncrement;
         else
@@ -1164,7 +1159,6 @@ public class TikFinityClient : ModSystem
         {
             var player = Main.LocalPlayer;
 
-            // Ищем существующую стрекозу этого зрителя
             NPC existing = Main.npc.FirstOrDefault(n =>
                 n.active &&
                 n.type == NPCID.GreenDragonfly &&
@@ -1175,15 +1169,15 @@ public class TikFinityClient : ModSystem
             if (existing != null)
             {
                 var g = existing.GetGlobalNPC<LikeFloatingTextGlobal>();
-                g.likeCount = totalLikes; // обновляем до накопленного значения
+                g.likeCount = totalLikes;
                 g.TriggerCombo(player.Center + new Vector2(0, -50));
                 existing.netUpdate = true;
                 return;
             }
 
-            if (CountActiveDragonflies() >= 10) return;
+            if (CountActiveDragonflies() >= 10)
+                return;
 
-            // Создаём новую стрекозу
             int npcID = NPC.NewNPC(
                 player.GetSource_FromThis(),
                 (int)player.Center.X + Main.rand.Next(-30, 30),
@@ -1200,17 +1194,31 @@ public class TikFinityClient : ModSystem
                 npc.noTileCollide = true;
                 npc.life = 1;
                 npc.lifeMax = 1;
-                npc.timeLeft = LikeFloatingTextGlobal.MaxLife; // ← важно!
+                npc.timeLeft = LikeFloatingTextGlobal.MaxLife;
 
                 var g = npc.GetGlobalNPC<LikeFloatingTextGlobal>();
                 g.viewerKey = viewerKey;
                 g.viewerName = cleanName;
-                g.likeCount = totalLikes; // ← используем накопленное значение
+                g.likeCount = totalLikes;
                 g.life = 0;
                 g.TriggerCombo(player.Center + new Vector2(0, -50));
                 npc.netUpdate = true;
             }
         });
+    }
+
+    private void ProcessLikeEvent(JsonElement root, string nickname)
+    {
+        int likeIncrement = 1;
+        if (root.TryGetProperty("count", out var countProp) &&
+            countProp.ValueKind == JsonValueKind.Number)
+        {
+            likeIncrement = countProp.GetInt32();
+        }
+
+        string viewerKey = ExtractViewerKey(root);
+
+        HandleLike(viewerKey, nickname, likeIncrement);
     }
 
     // --- SpawnViewerButterfly / SpawnCommentFirefly / SpawnSubscriberSlime / SpawnVeteranSlime ---
@@ -1502,7 +1510,10 @@ public class TikFinityClient : ModSystem
             UserName = TikTestFactory.RandomName(),
             RepeatCount = count
         };
-        GiftEnemySpawner.SpawnGiftEnemy("TEST_USER", 5);
+        for (int i = 0; i < count; i++)
+        {
+            GiftEnemySpawner.SpawnGiftEnemy(fakeGift.UserName, 1);
+        }
         Main.NewText($"[TEST] Gift x{count} от {fakeGift.UserName}", Color.Gold);
     }
 
@@ -1570,6 +1581,16 @@ public class TikFinityClient : ModSystem
 
         SpawnGifterSlime(fakeJoinGifter.UserName);
         Main.NewText($"[TEST] Gifter joined: {fakeJoinGifter.UserName}", Color.Red);
+    }
+
+    public static void TestLike(int count = 10)
+    {
+        string viewerKey = "TEST_VIEWER";
+        string name = "TEST_USER";
+
+        HandleLike(viewerKey, name, count);
+
+        Main.NewText($"[TEST] Likes x{count} от {name}", Color.HotPink);
     }
 
     #endregion
