@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>OBS Chat Overlay</title>
+
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
+
+:root {
+  --bg: rgba(20,20,20,0.9);
+  --radius: 10px;
+  --blur: blur(10px);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: transparent;
+  font-family: 'Inter', sans-serif;
+  color: white;
+}
+
+#log {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  max-height: 100vh;
+  overflow: hidden;
+}
+
+/* ===== Message card ===== */
+
+.msg {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+
+  background: var(--bg);
+  backdrop-filter: var(--blur);
+  border-radius: var(--radius);
+  padding: 6px 10px;
+
+  animation: slideFade 0.35s ease-out forwards;
+  opacity: 0;
+  transform: translateY(6px);
+}
+
+@keyframes slideFade {
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ===== Platform icons ===== */
+
+.icon {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.tiktok .icon { color: #69C9D0; }
+.youtube .icon { color: #FF4444; }
+.twitch .icon  { color: #9146FF; }
+
+.error {
+  background: rgba(255,80,80,0.3);
+  color: #ffb3b3;
+}
+
+/* ===== Text ===== */
+
+.content {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.nick {
+  font-weight: 600;
+  font-size: 20px;
+  opacity: 0.95;
+}
+
+.text {
+  font-size: 20px;
+  line-height: 1.3;
+  opacity: 0.9;
+}
+.gift {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.gift img {
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  object-fit: cover;
+}
+
+.gift-name {
+  font-weight: 600;
+  color: #ffd700;
+}
+/* ===== Event types colors ===== */
+.msg.gift {
+  border-left: 30px solid #FF5555; /* красный для подарков */
+}
+.msg.follow {
+  border-left: 30px solid #55FF55; /* зелёный для подписок */
+}
+.msg.share {
+  border-left: 30px solid #5599FF; /* синий для репостов */
+}
+.msg.pinned {
+  background: rgba(255, 255, 255, 0.1);
+  border-left: 30px solid #FFD700; /* золотой для текущего трека */
+  font-size: 20px;
+  margin-bottom: 8px;
+  pointer-events: none; /* нельзя выделять */
+}
+.msg.pinned .nick {
+  font-weight: 700;
+  font-size: 22px;
+  color: #fff;
+}
+.msg.pinned .text {
+  font-size: 20px;
+  color: #fff;
+}
+</style>
+</head>
+
+<body>
+
+<div id="log">
+  <div id="current-track" class="msg pinned">
+    <div class="content">
+      <div class="nick">🎵 Сейчас играет:</div>
+      <div class="text">— Плейлист пуст —</div>
+    </div>
+  </div>
+</div>
+<div id="player" style="width:1px;height:1px;opacity:0;"></div>
+<script src="https://www.youtube.com/iframe_api"></script>
+
+<script>
+const logEl = document.getElementById('log');
+const currentTrackEl = document.getElementById('current-track');
+const tiktokLikes = new Map();
+const icons = {
+  tiktok: `
+    <svg class="icon" viewBox="0 0 24 24" fill="currentColor">
+      <path d="M12.5 2v12.2a3.3 3.3 0 1 1-2.4-3.2V8.3a6.4 6.4 0 1 0 5.3 6.3V7.6c1.2.8 2.6 1.3 4.1 1.3V6.2c-2.1 0-4.2-1.7-4.2-4.2h-2.8z"/>
+    </svg>`,
+  youtube: `
+    <svg class="icon" viewBox="0 0 24 24" fill="currentColor">
+      <path d="M23.5 6.5s-.2-1.7-.9-2.4c-.8-.9-1.7-.9-2.1-1C17.7 2.8 12 2.8 12 2.8h0s-5.7 0-8.5.3c-.4.1-1.3.1-2.1 1C.7 4.8.5 6.5.5 6.5S0 8.4 0 10.2v1.7c0 1.8.5 3.7.5 3.7s.2 1.7.9 2.4c.8.9 1.9.9 2.4 1 1.7.2 7.2.3 7.2.3s5.7 0 8.5-.3c.4-.1 1.3-.1 2.1-1 .7-.7.9-2.4.9-2.4s.5-1.8.5-3.7v-1.7c0-1.8-.5-3.7-.5-3.7zM9.5 14.6V7.8l6.2 3.4-6.2 3.4z"/>
+    </svg>`,
+  twitch: `
+    <svg class="icon" viewBox="0 0 24 24" fill="currentColor">
+      <path d="M4 2L2 6v14h5v2h3l2-2h4l4-4V2H4zm14 12l-2 2h-4l-2 2v-2H6V4h12v10z"/>
+    </svg>`
+};
+let songQueueDisplay = {
+  current: null,
+  list: []
+};
+
+function updateCurrentTrack() {
+  if(songQueueDisplay.current) {
+    currentTrackEl.querySelector('.text').innerHTML =
+      `${songQueueDisplay.current.author} — ${songQueueDisplay.current.title}`;
+  } else {
+    currentTrackEl.querySelector('.text').innerHTML = '— Плейлист пуст —';
+  }
+}
+
+// функция для обновления очереди прямо в чате
+function displayQueue() {
+  // удаляем старые элементы очереди
+  document.querySelectorAll('.msg.queue-item').forEach(el => el.remove());
+
+  const displayQueue = songQueueDisplay.list.slice(0, 3);
+
+  // создаём фрагмент, чтобы вставлять все элементы одним разом
+  const fragment = document.createDocumentFragment();
+
+  displayQueue.forEach((t, i) => {
+    const el = document.createElement('div');
+    el.className = 'msg queue-item';
+    el.innerHTML = `
+      <div class="content">
+        <div class="nick">⏭ ${i + 1}</div>
+        <div class="text">${t.author} — ${t.title}</div>
+      </div>
+    `;
+    fragment.appendChild(el);
+  });
+
+  // если элементов больше 3, показываем "+N ещё"
+  if (songQueueDisplay.list.length > 3) {
+    const more = document.createElement('div');
+    more.className = 'msg queue-item';
+    more.innerHTML = `
+      <div class="content">
+        <div class="nick">…</div>
+        <div class="text">+${songQueueDisplay.list.length - 3} ещё...</div>
+      </div>
+    `;
+    fragment.appendChild(more);
+  }
+
+  // вставляем весь фрагмент **после текущего трека**
+  currentTrackEl.after(fragment);
+
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function updateNicknameEverywhere(userId, newNick) {
+  document
+    .querySelectorAll(`.nick[data-user-id="${userId}"]`)
+    .forEach(el => {
+      el.textContent = newNick;
+    });
+}
+
+
+function logMessage(platform, userId, nickname, text, isError = false, extraClass = '') {
+  const el = document.createElement('div');
+  el.className = `msg ${platform} ${isError ? 'error' : ''} ${extraClass}`;
+  el.dataset.userId = userId;
+
+  el.innerHTML = `
+    ${icons[platform] || ''}
+    <div class="content">
+      <div class="nick" data-user-id="${userId}">${nickname}</div>
+      <div class="text">${text}</div>
+    </div>
+  `;
+
+  logEl.appendChild(el);
+
+  while (logEl.querySelectorAll('.msg:not(.pinned):not(.queue-item)').length > 50)
+  logEl.querySelector('.msg:not(.pinned):not(.queue-item)').remove();
+
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+/* ===== WebSocket ===== */
+
+const ws = new WebSocket("ws://127.0.0.1:21214");
+let player;
+
+function play(videoId) {
+  if (!player) {
+    player = new YT.Player('player', {
+      height: '0',
+      width: '0',
+      videoId,
+      playerVars: { autoplay: 1, controls: 0 },
+      events: {
+        onReady: (event) => {
+          event.target.unMute(); // включаем звук
+          event.target.playVideo();
+        },
+        onStateChange: (event) => {
+          if (event.data === YT.PlayerState.ENDED) {
+            ws.send(JSON.stringify({ event: 'trackEnded' }));
+          }
+        }
+      }
+    });
+  } else {
+    // для текущего игрока убедимся, что он готов
+    const tryPlay = () => {
+      if (player && player.loadVideoById) {
+        player.loadVideoById(videoId);
+        player.unMute();
+        player.playVideo();
+      } else {
+        setTimeout(tryPlay, 200); // ждём готовности
+      }
+    };
+    tryPlay();
+  }
+}
+
+ws.onopen = () =>
+  logMessage('WS', 0, 'System', 'WebSocket подключён');
+
+ws.onclose = () =>
+  logMessage('WS', 0, 'System', 'WebSocket отключён', true);
+
+ws.onerror = () =>
+  logMessage('WS', 0, 'System', 'Ошибка WebSocket', true);
+
+ws.onmessage = e => {
+  try {
+    const d = JSON.parse(e.data);
+
+    if(d.event === 'music') {
+      songQueueDisplay.current = {
+        videoId: d.data.videoId,
+        author: d.data.author || 'Unknown',
+        title: d.data.title || 'Unknown'
+      };
+      updateCurrentTrack();
+      displayQueue();
+      play(d.data.videoId);
+    }
+
+    if(d.event === 'queue') {
+      songQueueDisplay.list = d.data.list || [];
+      updateCurrentTrack();
+      displayQueue();
+    }
+
+    if(d.event === 'trackEnded') {
+      if(songQueueDisplay.list.length > 0) {
+        songQueueDisplay.current = songQueueDisplay.list.shift();
+      } else {
+        songQueueDisplay.current = null;
+      }
+      updateCurrentTrack();
+      displayQueue();
+    }
+
+    if (d.event === 'like' && d.platform === 'tiktok') {
+      const { userId, nickname, amount } = d.data;
+
+      const prev = tiktokLikes.get(userId) || 0;
+      const total = prev + amount;
+      tiktokLikes.set(userId, total);
+
+      const newNick = `[TikTok] ${nickname} ❤️×${total}`;
+      updateNicknameEverywhere(userId, newNick);
+    }
+
+    if (d.event === 'chat')
+      logMessage(d.platform, d.data.userId, d.data.nickname, d.data.text);
+
+    if (d.event === 'gift') {
+      console.log('GIFT RECEIVED', d); // для отладки
+      const g = d.data.gift || {};
+      const amount = d.data.amount ?? 1;
+      // HTML для подарка
+      const giftHtml =
+        '<div class="gift">' +
+        (g.icon ? '<img src="' + g.icon + '" />' : '🎁') +
+        '<span class="gift-name">' + (g.name || 'Подарок') + '</span>' +
+        ' ×' + amount +
+        '</div>';
+        // Логируем сообщение
+        logMessage(d.platform, d.data.userId, d.data.nickname, giftHtml, false, 'gift');
+        // Воспроизведение звука
+        const audio = document.getElementById('gift-sound');
+        if (audio) {
+            //audio.currentTime = 0; // сброс на начало
+            //audio.play().catch(err => console.log('Ошибка воспроизведения звука:', err));
+        }
+    }
+
+    if (d.event === 'share')
+      logMessage(d.platform, d.data.userId, d.data.nickname, 'Поделился трансляцией!', false, 'share');
+
+    if (d.event === 'follow')
+      logMessage(d.platform, d.data.userId, d.data.nickname, 'Теперь подписчик', false, 'follow');
+  } catch (err) {
+      logMessage('system', 0, 'System', 'Ошибка парсинга сообщения', true);
+      console.error(err, e.data);
+    }
+};
+</script>
+
+
+<audio id="gift-sound" src="gift-sound.mp3" preload="auto"></audio>
+</body>
+</html>
