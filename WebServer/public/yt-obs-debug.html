@@ -81,6 +81,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  width: 100%;
 }
 
 .nick {
@@ -94,6 +95,7 @@ body {
   line-height: 1.3;
   opacity: 0.9;
 }
+
 .gift {
   display: inline-flex;
   align-items: center;
@@ -111,6 +113,7 @@ body {
   font-weight: 600;
   color: #ffd700;
 }
+
 /* ===== Event types colors ===== */
 .msg.gift {
   border-left: 30px solid #FF5555; /* красный для подарков */
@@ -121,15 +124,159 @@ body {
 .msg.share {
   border-left: 30px solid #5599FF; /* синий для репостов */
 }
+.msg.pinned {
+  border-left: 30px solid #FFD700; /* золотой для текущего трека */
+  font-size: 20px;
+  margin-bottom: 8px;
+  pointer-events: none; /* нельзя выделять */
+}
+.msg.pinned .nick {
+  font-weight: 700;
+  font-size: 22px;
+  color: #fff;
+}
+.msg.pinned .text {
+  font-size: 20px;
+  color: #fff;
+}
+
+/* ===== Плеер и прогресс-бар ===== */
+.player-section {
+  margin-top: 8px;
+  width: 100%;
+}
+
+.progress-container {
+  width: 100%;
+  height: 8px;
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 6px;
+}
+
+.progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, #FF5555, #FFD700);
+  width: 0%;
+  border-radius: 4px;
+  transition: width 0.3s ease;
+}
+
+.time-info {
+  display: flex;
+  justify-content: space-between;
+  font-size: 16px;
+  color: #ddd;
+  margin-bottom: 4px;
+}
+
+.current-time, .total-time {
+  font-weight: 600;
+}
+
+.remaining-time {
+  font-size: 16px;
+  color: #ffd700;
+  font-weight: 600;
+  text-align: center;
+  background: rgba(255, 215, 0, 0.1);
+  padding: 2px 8px;
+  border-radius: 4px;
+  margin-top: 4px;
+}
+
+.queue-item {
+  border-left: 3px solid #5599FF;
+}
+
+/* ===== Анимация для оставшегося времени ===== */
+@keyframes pulse {
+  0% { opacity: 1; }
+  50% { opacity: 0.7; }
+  100% { opacity: 1; }
+}
+
+.remaining-time.low-time {
+  animation: pulse 1s infinite;
+  background: rgba(255, 80, 80, 0.2);
+  color: #ff8080;
+}
+
+/* Стиль для заказчика в текущем треке */
+.requester {
+    font-size: 18px;
+    color: #69C9D0;
+    margin-top: 4px;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+/* Стиль для элементов очереди */
+.queue-item .content {
+    width: 100%;
+}
+
+.queue-item .nick {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 18px;
+}
+
+.queue-item .requester-badge {
+    background: rgba(105, 201, 208, 0.2);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 14px;
+    margin-left: 8px;
+}
+
+.queue-item .author {
+    font-size: 16px;
+    opacity: 0.7;
+    margin-left: 8px;
+}
+
+.queue-item .text {
+    font-size: 18px;
+    margin-top: 2px;
+    opacity: 0.9;
+}
 </style>
 </head>
 
 <body>
 
-<div id="log"></div>
+<div id="log">
+  <div id="current-track" class="msg pinned">
+    <div class="content">
+      <div class="nick"></div>
+      <div class="text"></div>
+      <div class="player-section">
+        <div class="time-info">
+          <span class="current-time">0:00</span>
+          <span class="total-time">0:00</span>
+        </div>
+        <div class="progress-container">
+          <div class="progress-bar" id="progress-bar"></div>
+        </div>
+        <div class="remaining-time" id="remaining-time"></div>
+      </div>
+    </div>
+  </div>
+</div>
+<div id="player" style="width:1px;height:1px;opacity:0;"></div>
+<script src="https://www.youtube.com/iframe_api"></script>
 
 <script>
 const logEl = document.getElementById('log');
+const currentTrackEl = document.getElementById('current-track');
+const progressBarEl = document.getElementById('progress-bar');
+const currentTimeEl = currentTrackEl.querySelector('.current-time');
+const totalTimeEl = currentTrackEl.querySelector('.total-time');
+const remainingTimeEl = document.getElementById('remaining-time');
+
 const tiktokLikes = new Map();
 const icons = {
   tiktok: `
@@ -146,6 +293,158 @@ const icons = {
     </svg>`
 };
 
+let songQueueDisplay = {
+  current: null,
+  list: []
+};
+
+let player;
+let progressInterval;
+let currentVideoDuration = 0;
+
+// Форматирование времени
+function formatTime(seconds) {
+  const mins = Math.floor(seconds / 60);
+  const secs = Math.floor(seconds % 60);
+  return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
+}
+
+// Обновление прогресса
+function updateProgress() {
+  if (!player || !player.getCurrentTime) return;
+  
+  try {
+    const currentTime = player.getCurrentTime();
+    const duration = player.getDuration() || currentVideoDuration;
+    
+    if (duration > 0) {
+      const progressPercent = (currentTime / duration) * 100;
+      progressBarEl.style.width = `${progressPercent}%`;
+      
+      currentTimeEl.textContent = formatTime(currentTime);
+      totalTimeEl.textContent = formatTime(duration);
+      
+      // Оставшееся время
+      const remaining = duration - currentTime;
+      remainingTimeEl.textContent = `⏱️ Осталось: ${formatTime(remaining)}`;
+      
+      // Если осталось меньше 30 секунд - добавляем анимацию
+      if (remaining < 30) {
+        remainingTimeEl.classList.add('low-time');
+      } else {
+        remainingTimeEl.classList.remove('low-time');
+      }
+    }
+  } catch (err) {
+    console.log('Ошибка обновления прогресса:', err);
+  }
+}
+
+// Начать обновление прогресса
+function startProgressUpdate() {
+  clearInterval(progressInterval);
+  progressInterval = setInterval(updateProgress, 1000); // Обновляем каждую секунду
+}
+
+// Остановить обновление прогресса
+function stopProgressUpdate() {
+  clearInterval(progressInterval);
+  progressBarEl.style.width = '0%';
+  currentTimeEl.textContent = '0:00';
+  totalTimeEl.textContent = '0:00';
+  remainingTimeEl.textContent = '—';
+  remainingTimeEl.classList.remove('low-time');
+}
+
+function updateCurrentTrack() {
+    const textElement = currentTrackEl.querySelector('.text');
+    const requesterElement = currentTrackEl.querySelector('.requester');
+    
+    if(songQueueDisplay.current) {
+        // Формируем текст с автором и названием
+        textElement.innerHTML = 
+            `${songQueueDisplay.current.title}`;
+        
+        // Добавляем/обновляем блок с заказчиком
+        if (!requesterElement) {
+            const requesterDiv = document.createElement('div');
+            requesterDiv.className = 'requester';
+            requesterDiv.style.cssText = `
+                font-size: 18px;
+                color: #69C9D0;
+                margin-top: 4px;
+                font-weight: 600;
+            `;
+            currentTrackEl.querySelector('.content').prepend(requesterDiv);
+        }
+        
+        // Обновляем текст заказчика
+        const requester = songQueueDisplay.current.requester || 'Неизвестно';
+        currentTrackEl.querySelector('.requester').innerHTML = 
+            `Заказчик: ${requester}`;
+        
+        // Показываем плеер
+        currentTrackEl.querySelector('.player-section').style.display = 'block';
+    } else {
+        textElement.innerHTML = '— Плейлист пуст —';
+        // Убираем блок заказчика если есть
+        if (requesterElement) {
+            requesterElement.remove();
+        }
+        // Скрываем плеер
+        currentTrackEl.querySelector('.player-section').style.display = 'none';
+        stopProgressUpdate();
+    }
+}
+
+// функция для обновления очереди прямо в чате
+function displayQueue() {
+    // удаляем старые элементы очереди
+    document.querySelectorAll('.msg.queue-item').forEach(el => el.remove());
+
+    const displayQueue = songQueueDisplay.list.slice(0, 3);
+
+    // создаём фрагмент, чтобы вставлять все элементы одним разом
+    const fragment = document.createDocumentFragment();
+
+    displayQueue.forEach((t, i) => {
+        const el = document.createElement('div');
+        el.className = 'msg queue-item';
+        
+        // Форматируем ник заказчика
+        const requester = t.requester ? `👤 ${t.requester}` : '';
+        
+        el.innerHTML = `
+            <div class="content">
+                <div class="nick" style="display: flex; justify-content: space-between; align-items: center;">
+                    <span>⏭ ${i + 1} ${requester}</span>
+                    <span style="font-size: 16px; opacity: 0.7;">${t.author}</span>
+                </div>
+                <div class="text" style="font-size: 18px; margin-top: 2px;">${t.title}</div>
+            </div>
+        `;
+        fragment.appendChild(el);
+    });
+
+    // если элементов больше 3, показываем "+N ещё"
+    if (songQueueDisplay.list.length > 3) {
+        const more = document.createElement('div');
+        more.className = 'msg queue-item';
+        more.innerHTML = `
+            <div class="content">
+                <div class="nick">…</div>
+                <div class="text">+${songQueueDisplay.list.length - 3} ещё...</div>
+            </div>
+        `;
+        fragment.appendChild(more);
+    }
+
+    // вставляем весь фрагмент **после текущего трека**
+    currentTrackEl.after(fragment);
+
+    logEl.scrollTop = logEl.scrollHeight;
+}
+
 function updateNicknameEverywhere(userId, newNick) {
   document
     .querySelectorAll(`.nick[data-user-id="${userId}"]`)
@@ -153,7 +452,6 @@ function updateNicknameEverywhere(userId, newNick) {
       el.textContent = newNick;
     });
 }
-
 
 function logMessage(platform, userId, nickname, text, isError = false, extraClass = '') {
   const el = document.createElement('div');
@@ -170,8 +468,8 @@ function logMessage(platform, userId, nickname, text, isError = false, extraClas
 
   logEl.appendChild(el);
 
-  while (logEl.children.length > 50)
-    logEl.removeChild(logEl.firstChild);
+  while (logEl.querySelectorAll('.msg:not(.pinned):not(.queue-item)').length > 50)
+  logEl.querySelector('.msg:not(.pinned):not(.queue-item)').remove();
 
   logEl.scrollTop = logEl.scrollHeight;
 }
@@ -179,6 +477,69 @@ function logMessage(platform, userId, nickname, text, isError = false, extraClas
 /* ===== WebSocket ===== */
 
 const ws = new WebSocket("ws://127.0.0.1:21214");
+
+function play(videoId) {
+  if (!player) {
+    player = new YT.Player('player', {
+      height: '0',
+      width: '0',
+      videoId,
+      playerVars: { 
+        autoplay: 1, 
+        controls: 0,
+        modestbranding: 1,
+        rel: 0,
+        showinfo: 0
+      },
+      events: {
+        onReady: (event) => {
+          event.target.unMute();
+          event.target.playVideo();
+          currentVideoDuration = event.target.getDuration();
+          updateProgress();
+          startProgressUpdate();
+        },
+        onStateChange: (event) => {
+          if (event.data === YT.PlayerState.ENDED) {
+            stopProgressUpdate();
+            ws.send(JSON.stringify({ event: 'trackEnded' }));
+          } else if (event.data === YT.PlayerState.PLAYING) {
+            currentVideoDuration = player.getDuration();
+            startProgressUpdate();
+          } else if (event.data === YT.PlayerState.PAUSED) {
+            clearInterval(progressInterval);
+          }
+        },
+        onError: (event) => {
+          console.log('Ошибка YouTube плеера:', event);
+          stopProgressUpdate();
+        }
+      }
+    });
+  } else {
+    // Останавливаем старый интервал
+    stopProgressUpdate();
+    
+    // Загружаем новое видео
+    const tryPlay = () => {
+      if (player && player.loadVideoById) {
+        player.loadVideoById(videoId);
+        player.unMute();
+        player.playVideo();
+        
+        // Ждем, пока видео загрузится и начнет играть
+        setTimeout(() => {
+          currentVideoDuration = player.getDuration();
+          updateProgress();
+          startProgressUpdate();
+        }, 500);
+      } else {
+        setTimeout(tryPlay, 200);
+      }
+    };
+    tryPlay();
+  }
+}
 
 ws.onopen = () =>
   logMessage('WS', 0, 'System', 'WebSocket подключён');
@@ -192,6 +553,53 @@ ws.onerror = () =>
 ws.onmessage = e => {
   try {
     const d = JSON.parse(e.data);
+
+    if(d.event === 'music') {
+        songQueueDisplay.current = {
+            videoId: d.data.videoId,
+            author: d.data.author || 'Unknown',
+            title: d.data.title || 'Unknown',
+            requester: d.data.requester || 'Неизвестно' // Добавляем заказчика
+        };
+        updateCurrentTrack();
+        displayQueue();
+    
+        if (d.data.videoId && d.data.videoId.trim() !== '') {
+            play(d.data.videoId);
+        } else {
+            // Если пришел пустой трек (остановка)
+            stopProgressUpdate();
+            if (player && player.stopVideo) {
+                player.stopVideo();
+            }
+        }
+    }
+
+    if(d.event === 'queue') {
+        songQueueDisplay.list = d.data.list || [];
+        updateCurrentTrack();
+        displayQueue();
+    }
+
+    if(d.event === 'trackEnded') {
+      if(songQueueDisplay.list.length > 0) {
+        songQueueDisplay.current = songQueueDisplay.list.shift();
+      } else {
+        songQueueDisplay.current = null;
+      }
+      updateCurrentTrack();
+      displayQueue();
+      stopProgressUpdate();
+    }
+
+    if(d.event === 'music_stop') {
+      songQueueDisplay.current = null;
+      updateCurrentTrack();
+      stopProgressUpdate();
+      if (player && player.stopVideo) {
+        player.stopVideo();
+      }
+    }
 
     if (d.event === 'like' && d.platform === 'tiktok') {
       const { userId, nickname, amount } = d.data;
@@ -223,8 +631,8 @@ ws.onmessage = e => {
         // Воспроизведение звука
         const audio = document.getElementById('gift-sound');
         if (audio) {
-            audio.currentTime = 0; // сброс на начало
-            audio.play().catch(err => console.log('Ошибка воспроизведения звука:', err));
+            //audio.currentTime = 0; // сброс на начало
+            //audio.play().catch(err => console.log('Ошибка воспроизведения звука:', err));
         }
     }
 
@@ -238,8 +646,20 @@ ws.onmessage = e => {
       console.error(err, e.data);
     }
 };
-</script>
 
+// Инициализация YouTube API
+window.onYouTubeIframeAPIReady = function() {
+  console.log('YouTube API готов');
+};
+
+// Очистка при закрытии страницы
+window.addEventListener('beforeunload', () => {
+  stopProgressUpdate();
+  if (player && player.destroy) {
+    player.destroy();
+  }
+});
+</script>
 
 <audio id="gift-sound" src="gift-sound.mp3" preload="auto"></audio>
 </body>
