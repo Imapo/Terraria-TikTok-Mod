@@ -22,29 +22,42 @@ body {
   background: transparent;
   font-family: 'Inter', sans-serif;
   color: white;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
 }
 
+/* ===== FIXED PLAYER SECTION ===== */
+#player-section {
+  flex-shrink: 0;
+  width: 100%;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  backdrop-filter: blur(5px);
+  padding: 0px 10px;
+}
+
+/* ===== CHAT SECTION ===== */
 #log {
+  flex: 1;
   display: flex;
   flex-direction: column;
   gap: 6px;
   padding: 10px;
-  max-height: 100vh;
-  overflow: hidden;
+  overflow-y: auto; /* Изменено с hidden на auto */
+  overflow-x: hidden;
+  margin-top: 0;
 }
 
 /* ===== Message card ===== */
-
 .msg {
   display: flex;
   align-items: flex-start;
   gap: 8px;
-
   background: var(--bg);
   backdrop-filter: var(--blur);
-  border-radius: var(--radius);
   padding: 6px 10px;
-
   animation: slideFade 0.35s ease-out forwards;
   opacity: 0;
   transform: translateY(6px);
@@ -58,7 +71,6 @@ body {
 }
 
 /* ===== Platform icons ===== */
-
 .icon {
   width: 18px;
   height: 18px;
@@ -76,7 +88,6 @@ body {
 }
 
 /* ===== Text ===== */
-
 .content {
   display: flex;
   flex-direction: column;
@@ -114,28 +125,18 @@ body {
   color: #ffd700;
 }
 
-/* ===== Event types colors ===== */
-.msg.gift {
-  border-left: 30px solid #FF5555; /* красный для подарков */
-}
-.msg.follow {
-  border-left: 30px solid #55FF55; /* зелёный для подписок */
-}
-.msg.share {
-  border-left: 30px solid #5599FF; /* синий для репостов */
-}
-.msg.pinned {
+/* ===== Current track ===== */
+#current-track {
   border-left: 30px solid #FFD700; /* золотой для текущего трека */
   font-size: 20px;
-  margin-bottom: 8px;
   pointer-events: none; /* нельзя выделять */
 }
-.msg.pinned .nick {
+#current-track .nick {
   font-weight: 700;
   font-size: 22px;
   color: #fff;
 }
-.msg.pinned .text {
+#current-track .text {
   font-size: 20px;
   color: #fff;
 }
@@ -144,6 +145,7 @@ body {
 .player-section {
   margin-top: 8px;
   width: 100%;
+  display: none; /* Скрыт по умолчанию */
 }
 
 .progress-container {
@@ -186,8 +188,32 @@ body {
   margin-top: 4px;
 }
 
+/* ===== Queue section ===== */
+#queue-section {
+  margin-top: 10px;
+  width: 100%;
+}
+
 .queue-item {
   border-left: 3px solid #5599FF;
+  border-bottom: 2px solid #222;
+}
+
+.queue-item .content {
+  width: 100%;
+}
+
+.queue-item .nick {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 18px;
+}
+
+.queue-item .text {
+  font-size: 18px;
+  margin-top: 2px;
+  opacity: 0.9;
 }
 
 /* ===== Анимация для оставшегося времени ===== */
@@ -205,54 +231,52 @@ body {
 
 /* Стиль для заказчика в текущем треке */
 .requester {
-    font-size: 18px;
-    color: #69C9D0;
-    margin-top: 4px;
-    font-weight: 600;
-    text-transform: uppercase;
+  font-size: 18px;
+  color: #69C9D0;
+  margin-top: 4px;
+  font-weight: 600;
+  display: none; /* Скрыт по умолчанию */
 }
 
-/* Стиль для элементов очереди */
-.queue-item .content {
-    width: 100%;
+/* Стиль для компактного режима */
+.compact-mode {
+  min-height: auto;
+  padding: 8px 10px;
 }
 
-.queue-item .nick {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    font-size: 18px;
+.compact-mode .text {
+  font-size: 20px;
+  margin: 0;
 }
 
-.queue-item .requester-badge {
-    background: rgba(105, 201, 208, 0.2);
-    padding: 2px 6px;
-    border-radius: 4px;
-    font-size: 14px;
-    margin-left: 8px;
+/* ===== Scrollbar styling ===== */
+#log::-webkit-scrollbar {
+  width: 6px;
 }
 
-.queue-item .author {
-    font-size: 16px;
-    opacity: 0.7;
-    margin-left: 8px;
+#log::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
 }
 
-.queue-item .text {
-    font-size: 18px;
-    margin-top: 2px;
-    opacity: 0.9;
+#log::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.3);
+  border-radius: 3px;
+}
+
+#log::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.5);
 }
 </style>
 </head>
 
 <body>
-
-<div id="log">
-  <div id="current-track" class="msg pinned">
+<!-- ===== FIXED PLAYER SECTION ===== -->
+<div id="player-section">
+  <div id="current-track" class="msg compact-mode">
     <div class="content">
       <div class="nick"></div>
-      <div class="text"></div>
+      <div class="text">— Плейлист пуст —</div>
       <div class="player-section">
         <div class="time-info">
           <span class="current-time">0:00</span>
@@ -265,18 +289,29 @@ body {
       </div>
     </div>
   </div>
+  
+  <div id="queue-section">
+    <!-- Queue items will be inserted here -->
+  </div>
 </div>
+
+<!-- ===== CHAT SECTION ===== -->
+<div id="log">
+  <!-- Chat messages will be inserted here -->
+</div>
+
 <div id="player" style="width:1px;height:1px;opacity:0;"></div>
 <script src="https://www.youtube.com/iframe_api"></script>
 
 <script>
 const logEl = document.getElementById('log');
+const playerSectionEl = document.getElementById('player-section');
 const currentTrackEl = document.getElementById('current-track');
+const queueSectionEl = document.getElementById('queue-section');
 const progressBarEl = document.getElementById('progress-bar');
 const currentTimeEl = currentTrackEl.querySelector('.current-time');
 const totalTimeEl = currentTrackEl.querySelector('.total-time');
 const remainingTimeEl = document.getElementById('remaining-time');
-
 const tiktokLikes = new Map();
 const icons = {
   tiktok: `
@@ -292,12 +327,10 @@ const icons = {
       <path d="M4 2L2 6v14h5v2h3l2-2h4l4-4V2H4zm14 12l-2 2h-4l-2 2v-2H6V4h12v10z"/>
     </svg>`
 };
-
 let songQueueDisplay = {
   current: null,
   list: []
 };
-
 let player;
 let progressInterval;
 let currentVideoDuration = 0;
@@ -343,7 +376,7 @@ function updateProgress() {
 // Начать обновление прогресса
 function startProgressUpdate() {
   clearInterval(progressInterval);
-  progressInterval = setInterval(updateProgress, 1000); // Обновляем каждую секунду
+  progressInterval = setInterval(updateProgress, 1000);
 }
 
 // Остановить обновление прогресса
@@ -358,72 +391,83 @@ function stopProgressUpdate() {
 
 function updateCurrentTrack() {
     const textElement = currentTrackEl.querySelector('.text');
-    const requesterElement = currentTrackEl.querySelector('.requester');
+    const playerSection = currentTrackEl.querySelector('.player-section');
     
     if(songQueueDisplay.current) {
+        // Включаем расширенный режим
+        currentTrackEl.classList.remove('compact-mode');
+        
         // Формируем текст с автором и названием
-        textElement.innerHTML = 
-            `${songQueueDisplay.current.title}`;
+        textElement.innerHTML = `${songQueueDisplay.current.title}`;
         
         // Добавляем/обновляем блок с заказчиком
+        let requesterElement = currentTrackEl.querySelector('.requester');
         if (!requesterElement) {
             const requesterDiv = document.createElement('div');
             requesterDiv.className = 'requester';
-            requesterDiv.style.cssText = `
-                font-size: 18px;
-                color: #69C9D0;
-                margin-top: 4px;
-                font-weight: 600;
-            `;
-            currentTrackEl.querySelector('.content').prepend(requesterDiv);
+            currentTrackEl.querySelector('.content').appendChild(requesterDiv);
+            requesterElement = requesterDiv;
         }
         
         // Обновляем текст заказчика
         const requester = songQueueDisplay.current.requester || 'Неизвестно';
-        currentTrackEl.querySelector('.requester').innerHTML = 
-            `Заказчик: ${requester}`;
+        requesterElement.innerHTML = `Заказчик: ${requester}`;
+        requesterElement.style.display = 'block';
         
         // Показываем плеер
-        currentTrackEl.querySelector('.player-section').style.display = 'block';
+        playerSection.style.display = 'block';
     } else {
+        // Включаем компактный режим
+        currentTrackEl.classList.add('compact-mode');
+        
+        // Просто сообщение о пустом плейлисте
         textElement.innerHTML = '— Плейлист пуст —';
+        
         // Убираем блок заказчика если есть
+        const requesterElement = currentTrackEl.querySelector('.requester');
         if (requesterElement) {
-            requesterElement.remove();
+            requesterElement.style.display = 'none';
         }
+        
         // Скрываем плеер
-        currentTrackEl.querySelector('.player-section').style.display = 'none';
+        playerSection.style.display = 'none';
         stopProgressUpdate();
     }
 }
 
-// функция для обновления очереди прямо в чате
+// функция для обновления очереди
 function displayQueue() {
-    // удаляем старые элементы очереди
-    document.querySelectorAll('.msg.queue-item').forEach(el => el.remove());
+    // очищаем очередь
+    queueSectionEl.innerHTML = '';
+
+    // Показываем очередь только если есть треки
+    if (songQueueDisplay.list.length === 0) return;
 
     const displayQueue = songQueueDisplay.list.slice(0, 3);
-
-    // создаём фрагмент, чтобы вставлять все элементы одним разом
-    const fragment = document.createDocumentFragment();
 
     displayQueue.forEach((t, i) => {
         const el = document.createElement('div');
         el.className = 'msg queue-item';
         
         // Форматируем ник заказчика
-        const requester = t.requester ? `👤 ${t.requester}` : '';
-        
+        const requester = t.requester ? `🧐 ${t.requester}` : '';
+        const durationText = t.duration
+        ? `⏱ ${formatTime(t.duration)}`
+        : '⏱ --:--';
         el.innerHTML = `
-            <div class="content">
-                <div class="nick" style="display: flex; justify-content: space-between; align-items: center;">
-                    <span>⏭ ${i + 1} ${requester}</span>
-                    <span style="font-size: 16px; opacity: 0.7;">${t.author}</span>
-                </div>
-                <div class="text" style="font-size: 18px; margin-top: 2px;">${t.title}</div>
+          <div class="content">
+            <div class="nick" style="display: flex; justify-content: space-between; align-items: center;">
+              <span>⏭ ${i + 1} ${requester}</span>
+              <span style="font-size: 16px; opacity: 0.7;">
+                ${durationText}
+              </span>
             </div>
+            <div class="text" style="font-size: 18px; margin-top: 2px;">
+              ${t.title}
+            </div>
+          </div>
         `;
-        fragment.appendChild(el);
+        queueSectionEl.appendChild(el);
     });
 
     // если элементов больше 3, показываем "+N ещё"
@@ -436,13 +480,8 @@ function displayQueue() {
                 <div class="text">+${songQueueDisplay.list.length - 3} ещё...</div>
             </div>
         `;
-        fragment.appendChild(more);
+        queueSectionEl.appendChild(more);
     }
-
-    // вставляем весь фрагмент **после текущего трека**
-    currentTrackEl.after(fragment);
-
-    logEl.scrollTop = logEl.scrollHeight;
 }
 
 function updateNicknameEverywhere(userId, newNick) {
@@ -453,6 +492,14 @@ function updateNicknameEverywhere(userId, newNick) {
     });
 }
 
+function scrollChatToBottom() {
+  // Ждем следующего цикла рендеринга
+  setTimeout(() => {
+    logEl.scrollTop = logEl.scrollHeight;
+  }, 50);
+}
+
+// В функции logMessage добавьте вызов автоскролла
 function logMessage(platform, userId, nickname, text, isError = false, extraClass = '') {
   const el = document.createElement('div');
   el.className = `msg ${platform} ${isError ? 'error' : ''} ${extraClass}`;
@@ -468,14 +515,16 @@ function logMessage(platform, userId, nickname, text, isError = false, extraClas
 
   logEl.appendChild(el);
 
-  while (logEl.querySelectorAll('.msg:not(.pinned):not(.queue-item)').length > 50)
-  logEl.querySelector('.msg:not(.pinned):not(.queue-item)').remove();
+  // Ограничиваем количество сообщений в чате
+  while (logEl.children.length > 50) {
+    logEl.removeChild(logEl.firstChild);
+  }
 
-  logEl.scrollTop = logEl.scrollHeight;
+  // Автоскролл к новому сообщению
+  scrollChatToBottom();
 }
 
 /* ===== WebSocket ===== */
-
 const ws = new WebSocket("ws://127.0.0.1:21214");
 
 function play(videoId) {
@@ -559,7 +608,7 @@ ws.onmessage = e => {
             videoId: d.data.videoId,
             author: d.data.author || 'Unknown',
             title: d.data.title || 'Unknown',
-            requester: d.data.requester || 'Неизвестно' // Добавляем заказчика
+            requester: d.data.requester || 'Неизвестно'
         };
         updateCurrentTrack();
         displayQueue();
@@ -567,7 +616,6 @@ ws.onmessage = e => {
         if (d.data.videoId && d.data.videoId.trim() !== '') {
             play(d.data.videoId);
         } else {
-            // Если пришел пустой трек (остановка)
             stopProgressUpdate();
             if (player && player.stopVideo) {
                 player.stopVideo();
@@ -594,11 +642,25 @@ ws.onmessage = e => {
 
     if(d.event === 'music_stop') {
       songQueueDisplay.current = null;
+      songQueueDisplay.list = [];
       updateCurrentTrack();
+      displayQueue();
       stopProgressUpdate();
       if (player && player.stopVideo) {
         player.stopVideo();
       }
+    }
+
+    if (d.event === "music_pause") {
+        if (player && typeof player.pauseVideo === 'function') {
+            player.pauseVideo();
+        }
+    }
+
+    if (d.event === "music_play") {
+        if (player && typeof player.playVideo === 'function') {
+            player.playVideo();
+        }
     }
 
     if (d.event === 'like' && d.platform === 'tiktok') {
@@ -616,24 +678,16 @@ ws.onmessage = e => {
       logMessage(d.platform, d.data.userId, d.data.nickname, d.data.text);
 
     if (d.event === 'gift') {
-      console.log('GIFT RECEIVED', d); // для отладки
+      console.log('GIFT RECEIVED', d);
       const g = d.data.gift || {};
       const amount = d.data.amount ?? 1;
-      // HTML для подарка
       const giftHtml =
         '<div class="gift">' +
         (g.icon ? '<img src="' + g.icon + '" />' : '🎁') +
         '<span class="gift-name">' + (g.name || 'Подарок') + '</span>' +
         ' ×' + amount +
         '</div>';
-        // Логируем сообщение
         logMessage(d.platform, d.data.userId, d.data.nickname, giftHtml, false, 'gift');
-        // Воспроизведение звука
-        const audio = document.getElementById('gift-sound');
-        if (audio) {
-            //audio.currentTime = 0; // сброс на начало
-            //audio.play().catch(err => console.log('Ошибка воспроизведения звука:', err));
-        }
     }
 
     if (d.event === 'share')
@@ -658,6 +712,11 @@ window.addEventListener('beforeunload', () => {
   if (player && player.destroy) {
     player.destroy();
   }
+});
+
+// Инициализация компактного режима при загрузке
+document.addEventListener('DOMContentLoaded', () => {
+  updateCurrentTrack();
 });
 </script>
 

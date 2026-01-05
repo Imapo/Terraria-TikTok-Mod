@@ -1,0 +1,119 @@
+﻿<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Chat Commands</title>
+<style>
+    body {
+        margin: 0;
+        padding: 0;
+        height: 100vh;
+        background: transparent;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-family: 'Segoe UI', sans-serif;
+        color: #fff;
+    }
+
+    .glass {
+        background: rgba(20, 20, 20, 0.95);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        border-radius: 16px;
+        padding: 24px 32px;
+        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+        min-width: 420px;
+    }
+
+    h1 {
+        margin: 0 0 16px;
+        text-align: center;
+        font-size: 24px;
+        letter-spacing: 1px;
+    }
+
+    table {
+        width: 100%;
+        border-collapse: collapse;
+    }
+
+    th, td {
+        padding: 10px 14px;
+        text-align: left;
+    }
+
+    th {
+        font-size: 14px;
+        text-transform: uppercase;
+        opacity: 0.7;
+        border-bottom: 1px solid rgba(255,255,255,0.2);
+    }
+
+    tr:not(:last-child) td {
+        border-bottom: 1px solid rgba(255,255,255,0.1);
+    }
+
+    .cmd {
+        font-family: monospace;
+        color: #7dd3fc;
+        font-weight: bold;
+    }
+
+    .role {
+        font-size: 13px;
+        opacity: 0.85;
+    }
+
+    .note {
+        font-size: 12px;
+        opacity: 0.6;
+        margin-top: 12px;
+        text-align: center;
+    }
+</style>
+</head>
+<body>
+
+<div class="glass">
+    <h1>🎵 Команды чата</h1>
+
+    <table>
+        <thead>
+            <tr>
+                <th>Команда</th>
+                <th>Описание</th>
+                <th>Кто может</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td class="cmd">!song</td>
+                <td>Заказать песню</td>
+                <td class="role">Все</td>
+            </tr>
+            <tr>
+                <td class="cmd">!skip</td>
+                <td>Пропустить трек</td>
+                <td class="role">Модер / Стример</td>
+            </tr>
+            <tr>
+                <td class="cmd">!stop</td>
+                <td>Остановить музыку</td>
+                <td class="role">Модер / Стример</td>
+            </tr>
+            <tr>
+                <td class="cmd">!queue</td>
+                <td>Показать очередь</td>
+                <td class="role">Все</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <div class="note">
+        Команды работают на Twitch / TikTok / YouTube
+    </div>
+</div>
+
+</body>
+</html>
