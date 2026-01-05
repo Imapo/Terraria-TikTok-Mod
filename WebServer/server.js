@@ -36,7 +36,6 @@ class SongQueue {
 
     add(song) {
         this.queue.push(song);
-        this.lastRequest.set(song.user, Date.now());
     }
 
     next() {
@@ -125,6 +124,18 @@ function stopYouTube(forceStop = false) {
     });
 }
 
+function pauseYouTube() {
+    broadcast({
+        event: 'music_pause'
+    });
+}
+
+function resumeYouTube() {
+    broadcast({
+        event: 'music_play'
+    });
+}
+
 function broadcast(event) {
     if (!wss) return;
     const msg = JSON.stringify(event);
@@ -152,11 +163,11 @@ function playYouTube(song) {
             videoId: song.videoId,
             author: song.author,
             title: song.title,
-            requester: song.requester // Добавляем заказчика
+            requester: song.requester,
+            duration: song.duration
         }
     });
 }
-
 
 function extractYouTubeID(input) {
     try {
@@ -210,15 +221,101 @@ function canSkipOrStop(tags) {
 }
 
 function canRequestSongs(tags) {
-    // Стример и модераторы могут всегда
-    if (isBroadcaster(tags) || isModerator(tags)) {
-        return true;
+    return true;
+}
+
+function getUnifiedCooldown({
+    isAnchor = false,
+    isMod = false,
+    isSubscriber = false,
+    isFollower = false
+}) {
+    if (isAnchor || isMod) return 0;
+    if (isSubscriber) return 1 * 60 * 1000;
+    if (isFollower) return 5 * 60 * 1000;
+    return 10 * 60 * 1000;
+}
+
+function getTikTokCooldown(userId, {
+    isAnchor = false,
+    isMod = false,
+    isSubscriber = false,
+    isFollower = false
+}) {
+    if (isAnchor || isMod) return 0;
+    if (isSubscriber) return 1 * 60 * 1000;
+    if (isFollower) return 5 * 60 * 1000; // 👈 фолловеры
+    return 10 * 60 * 1000;
+}
+
+async function handleSongRequest({
+    platform,
+    user,
+    userId,
+    text,
+    cooldownMs,
+    isAllowed = true
+}) {
+    if (!isAllowed) return;
+
+    const query = text.slice(6).trim();
+    if (!query) return;
+
+    const last = songQueue.lastRequest.get(`${platform}:${user}`) || 0;
+    const now = Date.now();
+
+    if (cooldownMs > 0 && now - last < cooldownMs) {
+        const sec = Math.ceil((cooldownMs - (now - last)) / 1000);
+        emit('chat', platform, {
+            userId,
+            nickname: user,
+            text: `⏳ Подожди ${Math.ceil(sec / 60)} мин перед следующим заказом`
+        });
+        return;
     }
-    // Подписчики могут
-    if (isSubscriber(tags)) {
-        return true;
+
+    let foundVideo;
+    const videoId = extractYouTubeID(query);
+
+    try {
+        if (videoId) {
+            const r = await yts({ videoId });
+            foundVideo = r.video || r;
+        } else {
+            const r = await yts({ query });
+            foundVideo = r.videos?.[0];
+        }
+    } catch {
+        return;
     }
-    return false;
+
+    if (!foundVideo) return;
+    if (foundVideo.seconds > 10 * 60) return;
+
+    songQueue.lastRequest.set(`${platform}:${user}`, now);
+
+    const song = {
+        user,
+        requester: user,
+        title: foundVideo.title,
+        videoId: foundVideo.videoId,
+        author: foundVideo.author?.name || 'Unknown',
+        duration: foundVideo.seconds || 0 // ⏱ ДЛИТЕЛЬНОСТЬ В СЕКУНДАХ
+    };
+
+    songQueue.add(song);
+
+    emit('chat', platform, {
+        userId,
+        nickname: user,
+        text: `🎵 Добавлено: ${song.author} — ${song.title}`
+    });
+
+    if (!songQueue.current) {
+        playYouTube(songQueue.next());
+    } else {
+        broadcastQueue();
+    }
 }
 
 function getCooldownForUser(user, tags) {
@@ -228,23 +325,23 @@ function getCooldownForUser(user, tags) {
     }
     // Для VIP - уменьшенный кулдаун
     if (isVIP(tags)) {
-        return 10 * 1000; // 30 секунд
+        return 0; // 0 секунд
     }
     // Для подписчиков - стандартный кулдаун
     if (isSubscriber(tags)) {
     const tier = tags['badges']?.subscriber || '1';
     switch(tier) {
         case '3000': // Tier 3
-            return 30 * 1000; // 30 секунд
+            return 10 * 1000; // 10 секунд
         case '2000': // Tier 2
-            return 60 * 1000; // 1 минута
+            return 30 * 1000; // 30 секунд
         case '1000': // Tier 1
         default:
-            return 5 * 60 * 1000; // 30 секунд
+            return 60 * 1000; // 1 минута
     }
 }
     // Для всех остальных - стандартный кулдаун (но они не смогут использовать !song)
-    return 60 * 60 * 1000;
+    return 5 * 60 * 1000;
 }
 
 /* =======================
@@ -375,119 +472,20 @@ async function main() {
 
             // ===== SONG REQUEST =====
             if (text.startsWith('!song ')) {
-                // Проверяем права на использование команды
-                if (!canRequestSongs(tags)) {
-                    twitch.say(STREAMER, `❌ ${user}, команда !song доступна только подписчикам! Подпишись на канал :)`);
-                    return;
-                }
+                const cooldownMs = getUnifiedCooldown({
+                    isAnchor: isBroadcaster(tags),
+                    isMod: isModerator(tags),
+                    isSubscriber: isSubscriber(tags),
+                    isFollower: false // Twitch follower через чат не определить
+                });
 
-                const query = text.slice(6).trim();
-
-                console.log('YouTube query:', query); // Для отладки
-
-                // Пытаемся извлечь ID YouTube из URL
-                const videoId = extractYouTubeID(query);
-                console.log('Extracted videoId:', videoId); // Для отладки
-
-                let foundVideo;
-
-                if (videoId) {
-                    // Если нашли ID, ищем видео по ID
-                    try {
-                        const result = await yts({
-                            videoId: videoId
-                        });
-                        foundVideo = result.video || result;
-
-                        if (!foundVideo || !foundVideo.videoId) {
-                            twitch.say(STREAMER, `❌ ${user}, не удалось найти видео по ссылке`);
-                            return;
-                        }
-                    } catch (err) {
-                        console.error('Error searching by videoId:', err);
-                        twitch.say(STREAMER, `❌ ${user}, ошибка при обработке ссылки: ${err.message}`);
-                        return;
-                    }
-                } else {
-                    // Если это не URL, ищем по запросу
-                    try {
-                        const results = await yts({
-                            query: query
-                        });
-                        foundVideo = results.videos?.[0];
-
-                        if (!foundVideo) {
-                            twitch.say(STREAMER, `❌ ${user}, не удалось найти трек по запросу`);
-                            return;
-                        }
-                    } catch (err) {
-                        console.error('Error searching by query:', err);
-                        twitch.say(STREAMER, `❌ ${user}, ошибка при поиске трека`);
-                        return;
-                    }
-                }
-
-                console.log('Found video:', foundVideo.title); // Для отладки
-
-                // Проверяем длительность
-                const MAX_DURATION = 10 * 60; // 10 минут
-                if (foundVideo.seconds && foundVideo.seconds > MAX_DURATION) {
-                    twitch.say(
-                        STREAMER,
-                        `⛔ ${user}, трек слишком длинный (${foundVideo.timestamp}), максимум ${MAX_DURATION / 60} минут`
-                    );
-                    return;
-                }
-
-                // Антиспам с учетом прав пользователя
-                const lastRequestTime = songQueue.lastRequest.get(user) || 0;
-                const now = Date.now();
-                const COOLDOWN = getCooldownForUser(user, tags);
-
-                if (COOLDOWN > 0 && now - lastRequestTime < COOLDOWN) {
-                    const remainingMs = COOLDOWN - (now - lastRequestTime);
-                    const remainingSec = Math.ceil(remainingMs / 1000);
-                    const min = Math.floor(remainingSec / 60);
-                    const sec = remainingSec % 60;
-
-                    twitch.say(
-                        STREAMER,
-                        `⏳ ${user}, подожди ${min > 0 ? min + 'м ' : ''}${sec}с перед следующим заказом`
-                    );
-                    return;
-                }
-
-                // Обновляем время последнего запроса
-                songQueue.lastRequest.set(user, now);
-
-                // Добавляем трек в очередь
-                // В функции handleSongRequest (или там где добавляется трек в Twitch чате):
-                const songData = {
+                await handleSongRequest({
+                    platform: 'twitch',
                     user,
-                    title: foundVideo.title,
-                    videoId: foundVideo.videoId,
-                    author: foundVideo.author?.name || foundVideo.author || 'Unknown',
-                    requester: user // Добавляем ник заказчика
-                };
-
-                songQueue.add(songData);
-
-                twitch.say(
-                    STREAMER,
-                    `🎵 ${user} добавил: ${songData.author} — ${songData.title}`
-                );
-
-                // Проверяем, играет ли что-то сейчас
-                if (!songQueue.current) {
-                    // Если ничего не играет, сразу запускаем этот трек
-                    const next = songQueue.next(); // next() удаляет первый элемент из очереди
-                    if (next) {
-                        playYouTube(next);
-                    }
-                } else {
-                    // Если уже что-то играет, просто обновляем очередь
-                    broadcastQueue();
-                }
+                    userId: tags['user-id'],
+                    text,
+                    cooldownMs
+                });
 
                 return;
             }
@@ -523,19 +521,6 @@ async function main() {
     
                 // Обновляем очередь
                 broadcastQueue();
-                return;
-            }
-
-            // ===== NOW PLAYING =====
-            if (text === '!np') {
-                if (songQueue.current) {
-                    twitch.say(
-                        STREAMER, 
-                        `🎶 Сейчас играет: ${songQueue.current.author} — ${songQueue.current.title}`
-                    );
-                } else {
-                    twitch.say(STREAMER, `🎵 Сейчас ничего не играет`);
-                }
                 return;
             }
 
@@ -585,6 +570,30 @@ async function main() {
                 songQueue.lastRequest.clear(); // Очищаем таймеры антиспама
                 broadcastQueue();
                 twitch.say(STREAMER, `⏹ Воспроизведение остановлено, очередь очищена`);
+                return;
+            }
+
+            // ===== PAUSE =====
+            if (text === '!pause') {
+                if (!canSkipOrStop(tags)) {
+                    twitch.say(STREAMER, `❌ ${user}, команда !pause доступна только модераторам и стримеру!`);
+                    return;
+                }
+
+                pauseYouTube();
+                twitch.say(STREAMER, `⏸ Трек поставлен на паузу`);
+                return;
+            }
+
+            // ===== PLAY =====
+            if (text === '!play') {
+                if (!canSkipOrStop(tags)) {
+                    twitch.say(STREAMER, `❌ ${user}, команда !play доступна только модераторам и стримеру!`);
+                    return;
+                }
+
+                resumeYouTube();
+                twitch.say(STREAMER, `▶️ Продолжаем воспроизведение`);
                 return;
             }
 
@@ -652,14 +661,137 @@ async function main() {
         });
 
         tt.on(WebcastEvent.CHAT, d => {
-            if (!tiktokLikes.has(d.user.userId)) {
-                tiktokLikes.set(d.user.userId, 0);
+            const text = d.comment;
+            const userId = d.user.userId;
+            const user = d.user.nickname;
+
+            // ⚡ Новый способ определения ролей
+            const identity = d.userIdentity || {};
+            const isAnchor = identity.isAnchor || false;
+            const isMod = identity.isModeratorOfAnchor || isAnchor;
+            const isSubscriber = identity.isSubscriberOfAnchor || false;
+            const isFollower = Boolean(identity.isFollower);
+
+            // Проверка команд на модератора
+            const canSkipStop = isMod;
+
+            // ===== SONG REQUEST =====
+            if (text.startsWith('!song ')) {
+                const cooldownMs = getTikTokCooldown(userId, {
+                    isAnchor,
+                    isMod,
+                    isSubscriber,
+                    isFollower
+                });
+
+                handleSongRequest({
+                    platform: 'tiktok',
+                    user,
+                    userId,
+                    text,
+                    cooldownMs
+                });
+                return;
             }
+
+            // ===== SKIP =====
+            if (text === '!skip') {
+                if (!canSkipStop) {
+                    emit('chat', 'tiktok', {
+                        userId,
+                        nickname: formatNickname('tiktok', user, userId),
+                        text: `❌ ${user}, команда !skip доступна только модераторам и стримеру!`
+                    });
+                    return;
+                }
+
+                stopYouTube(true);
+                songQueue.current = null;
+                const next = songQueue.next();
+                if (next) playYouTube(next);
+
+                broadcastQueue();
+                emit('chat', 'tiktok', {
+                    userId,
+                    nickname: formatNickname('tiktok', user, userId),
+                    text: next
+                        ? `⏭ Следующий трек: ${next.author} — ${next.title}`
+                        : `⏹ Очередь пуста, воспроизведение остановлено`
+                });
+                return;
+            }
+
+            // ===== STOP =====
+            if (text === '!stop') {
+                if (!canSkipStop) {
+                    emit('chat', 'tiktok', {
+                        userId,
+                        nickname: formatNickname('tiktok', user, userId),
+                        text: `❌ ${user}, команда !stop доступна только модераторам и стримеру!`
+                    });
+                    return;
+                }
+
+                stopYouTube();
+                songQueue.clearCurrent();
+                songQueue.queue = [];
+                songQueue.lastRequest.clear();
+                broadcastQueue();
+
+                emit('chat', 'tiktok', {
+                    userId,
+                    nickname: formatNickname('tiktok', user, userId),
+                    text: `⏹ Воспроизведение остановлено, очередь очищена`
+                });
+                return;
+            }
+
+            // ===== PAUSE =====
+            if (text === '!pause') {
+                if (!canSkipStop) {
+                    emit('chat', 'tiktok', {
+                        userId,
+                        nickname: formatNickname('tiktok', user, userId),
+                        text: `❌ Команда !pause доступна только модераторам и стримеру`
+                    });
+                    return;
+                }
+
+                pauseYouTube();
+                emit('chat', 'tiktok', {
+                    userId,
+                    nickname: formatNickname('tiktok', user, userId),
+                    text: `⏸ Трек поставлен на паузу`
+                });
+                return;
+            }
+
+            // ===== PLAY =====
+            if (text === '!play') {
+                if (!canSkipStop) {
+                    emit('chat', 'tiktok', {
+                        userId,
+                        nickname: formatNickname('tiktok', user, userId),
+                        text: `❌ Команда !play доступна только модераторам и стримеру`
+                    });
+                    return;
+                }
+
+                resumeYouTube();
+                emit('chat', 'tiktok', {
+                    userId,
+                    nickname: formatNickname('tiktok', user, userId),
+                    text: `▶️ Продолжаем воспроизведение`
+                });
+                return;
+            }
+
+            // ===== обычный чат =====
             emit('chat', 'tiktok', {
-                userId: d.user.userId,
-                nickname: formatNickname('tiktok', d.user.nickname, d.user.userId),
-                text: d.comment
-            })
+                userId,
+                nickname: formatNickname('tiktok', user, userId),
+                text
+            });
         });
 
         tt.on(WebcastEvent.GIFT, d => {
@@ -777,6 +909,12 @@ async function main() {
         });
 
         yt.on('chat', chatItem => {
+            const author = chatItem.author;
+            const isAnchor = author.isChatOwner === true;
+            const isMod = author.isChatModerator === true;
+            const isSubscriber = author.isChatSponsor === true;
+            // YouTube НЕ поддерживает follower
+            const isFollower = false;
             const msgId = chatItem.id;
             if (ytMessageCache.has(msgId)) return;
 
@@ -793,12 +931,120 @@ async function main() {
                 messageText = messageText.map(p => p.text).join('');
             }
 
+            if (messageText.startsWith('!song ')) {
+                const cooldownMs = getUnifiedCooldown({
+                    isAnchor,
+                    isMod,
+                    isSubscriber,
+                    isFollower
+                });
+
+                handleSongRequest({
+                    platform: 'youtube',
+                    user: chatItem.author.name,
+                    userId: chatItem.author.channelId,
+                    text: messageText,
+                    cooldownMs
+                });
+                return;
+            }
+
+            if (messageText === '!skip') {
+                if (!isAnchor && !isMod) {
+                    emit('chat', 'youtube', {
+                        userId,
+                        nickname: formatNickname('youtube', chatItem.author.name),
+                        text: `❌ ${chatItem.author.name}, команда !skip доступна только модераторам и стримеру!`
+                    });
+                    return;
+                }
+                stopYouTube(true);
+                songQueue.current = null;
+                const next = songQueue.next();
+                if (next) playYouTube(next);
+
+                broadcastQueue();
+                emit('chat', 'youtube', {
+                    userId,
+                    nickname: formatNickname('youtube', chatItem.author.name),
+                    text: next
+                        ? `⏭ Следующий трек: ${next.author} — ${next.title}`
+                        : `⏹ Очередь пуста, воспроизведение остановлено`
+                });
+                return;
+            }
+
+            // ===== STOP =====
+            if (messageText === '!stop') {
+                if (!isAnchor && !isMod) {
+                    emit('chat', 'youtube', {
+                        userId,
+                        nickname: formatNickname('youtube', chatItem.author.name),
+                        text: `❌ ${chatItem.author.name}, команда !stop доступна только модераторам и стримеру!`
+                    });
+                    return;
+                }
+
+                stopYouTube();
+                songQueue.clearCurrent();
+                songQueue.queue = [];
+                songQueue.lastRequest.clear();
+                broadcastQueue();
+
+                emit('chat', 'youtube', {
+                    userId,
+                    nickname: formatNickname('youtube', chatItem.author.name),
+                    text: `⏹ Воспроизведение остановлено, очередь очищена`
+                });
+                return;
+            }
+
             emit('chat', 'youtube', {
                 userId,
                 nickname: formatNickname('youtube', chatItem.author.name),
                 text: messageText
             });
         });
+
+        // ===== PAUSE =====
+        if (messageText === '!pause') {
+            if (!isAnchor && !isMod) {
+                emit('chat', 'youtube', {
+                    userId,
+                    nickname: formatNickname('youtube', chatItem.author.name),
+                    text: `❌ Команда !pause доступна только модераторам и стримеру`
+                });
+                return;
+            }
+
+            pauseYouTube();
+            emit('chat', 'youtube', {
+                userId,
+                nickname: formatNickname('youtube', chatItem.author.name),
+                text: `⏸ Трек поставлен на паузу`
+            });
+            return;
+        }
+
+        // ===== PLAY =====
+        if (messageText === '!play') {
+            if (!isAnchor && !isMod) {
+                emit('chat', 'youtube', {
+                    userId,
+                    nickname: formatNickname('youtube', chatItem.author.name),
+                    text: `❌ Команда !play доступна только модераторам и стримеру`
+                });
+                return;
+            }
+
+            resumeYouTube();
+            emit('chat', 'youtube', {
+                userId,
+                nickname: formatNickname('youtube', chatItem.author.name),
+                text: `▶️ Продолжаем воспроизведение`
+            });
+            return;
+        }
 
         yt.on('superchat', scItem => {
             emit('gift', 'youtube', {
