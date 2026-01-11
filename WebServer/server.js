@@ -1,5 +1,6 @@
 // server.js — TikTok + Twitch + YouTube → Terraria (FINAL)
-
+import fs from 'fs';
+import TelegramBot from 'node-telegram-bot-api';
 import open from 'open';
 import WebSocket from 'ws';
 import tmi from 'tmi.js';
@@ -34,12 +35,18 @@ class SongQueue {
         this.lastRequest = new Map(); // антиспам
     }
 
-    add(song) {
-        this.queue.push(song);
+    add(song, isVIP = false) {
+        if (isVIP) {
+            if (this.current) this.queue.unshift(song);
+            else this.current = song; // сразу воспроизводим
+        } else {
+            this.queue.push(song);
+        }
     }
 
     next() {
-        this.current = this.queue.shift() || null;
+        if (!this.current) this.current = this.queue.shift() || null;
+        else this.current = this.queue.shift() || null;
         return this.current;
     }
 
@@ -63,6 +70,7 @@ class SongQueue {
 }
 
 const songQueue = new SongQueue();
+const telegramVIPs = new Set(); // можно заполнять вручную или динамически
 const STREAMER = process.env.TWITCH_USERNAME;
 const TWITCH_OAUTH = process.env.TWITCH_TOKEN;
 const TIKTOK_USERNAME = process.env.TIKTOK_USERNAME;
@@ -77,6 +85,26 @@ const tiktokLikes = new Map();
 const ytMessageCache = new Set();
 const YT_CACHE_LIMIT = 500;
 let ytStarted = false;
+const TELEGRAM_COMMAND_MAP = {
+    '/song': '!song',
+    '/skip': '!skip',
+    '/queue': '!queue',
+    '/pause': '!pause',
+    '/play': '!play'
+};
+const VIP_FILE = './vip.json';
+const TELEGRAM_CHANNEL_ID = process.env.TG_CHANNEL_ID;
+let streamAnnounced = {
+    twitch: false,
+    youtube: false,
+    tiktok: false
+};
+let tgBot;
+const OWNER_ID = Number(process.env.OWNER_ID);
+// ===== История чата =====
+const chatHistory = []; // последние 50 сообщений
+const CHAT_HISTORY_LIMIT = 50;
+const aggregatedGifts = new Map();
 
 
 // Статические файлы
@@ -84,11 +112,117 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json());
 app.listen(3000, () => {
     console.log('🌐 HTTP → :3000');
-    open('http://localhost:3000/yt-obs-debug.html');
+    //open('http://localhost:3000/yt-obs-debug.html');
 });
 /* =======================
 WEBSOCKET → TERRARIA
 ======================= */
+
+function handleAggregatedGift(userId, nickname, giftName, giftIcon, amount = 1) {
+    const key = `${userId}:${giftName}`;
+    let entry = aggregatedGifts.get(key);
+
+    if (entry) {
+        // Увеличиваем количество и перемещаем в конец истории
+        entry.amount += amount;
+
+        // Обновляем текст
+        entry.text = `${nickname} подарил${entry.amount > 1 ? ` ${entry.amount}×` : ''} ${giftName}`;
+
+        // Перемещаем в конец истории
+        const idx = chatHistory.findIndex(m => m._giftKey === key);
+        if (idx !== -1) chatHistory.splice(idx, 1); // удаляем старое сообщение
+        chatHistory.push({ platform: 'tiktok', userId, nickname, text: entry.text, _giftKey: key });
+    } else {
+        // Создаём новое сообщение
+        entry = {
+            amount,
+            text: `${nickname} подарил ${giftName}`
+        };
+        aggregatedGifts.set(key, entry);
+        chatHistory.push({ platform: 'tiktok', userId, nickname, text: entry.text, _giftKey: key });
+    }
+
+    // Ограничиваем историю чата
+    if (chatHistory.length > CHAT_HISTORY_LIMIT) chatHistory.shift();
+
+    // Отправляем обновлённое сообщение через WebSocket
+    broadcast({
+        event: 'gift',
+        platform: 'tiktok',
+        data: {
+            userId,
+            nickname,
+            gift: { name: giftName, icon: giftIcon },
+            amount: entry.amount
+        }
+    });
+}
+
+function addToChatHistory(platform, data) {
+    chatHistory.push({ platform, ...data });
+    if (chatHistory.length > CHAT_HISTORY_LIMIT) chatHistory.shift();
+}
+
+async function announceStreamStart(platform) {
+    if (streamAnnounced[platform]) return;
+    streamAnnounced[platform] = true;
+
+    const text = {
+        twitch: `🔴 СТРИМ НАЧАЛСЯ НА TWITCH!
+
+▶️ https://twitch.tv/${STREAMER}
+
+💬 Чат трансляции:
+👉 https://t.me/imapolive_chat`,
+        youtube: `🔴 СТРИМ НАЧАЛСЯ НА YOUTUBE!
+
+▶️ https://youtube.com/channel/${YT_CHANNEL_ID}/live
+
+💬 Чат трансляции:
+👉 https://t.me/imapolive_chat`,
+        tiktok: `🔴 СТРИМ НАЧАЛСЯ В TIKTOK!
+
+▶️ https://www.tiktok.com/@${TIKTOK_USERNAME}/live
+
+💬 Чат трансляции:
+👉 https://t.me/imapolive_chat`
+    };
+
+    try {
+        await tgBot.sendMessage(
+            TELEGRAM_CHANNEL_ID,
+            text[platform],
+            { disable_web_page_preview: false }
+        );
+        console.log(`📣 Telegram announce sent: ${platform}`);
+    } catch (e) {
+        console.error('Telegram announce error:', e.message);
+    }
+}
+
+
+// Загружаем VIP из файла при старте
+function loadVIPs() {
+    if (fs.existsSync(VIP_FILE)) {
+        const data = JSON.parse(fs.readFileSync(VIP_FILE));
+        data.forEach(id => telegramVIPs.add(id));
+        console.log(`🌟 Загружено VIP пользователей: ${data.join(', ')}`);
+    }
+}
+
+// Сохраняем VIP в файл
+function saveVIPs() {
+    fs.writeFileSync(VIP_FILE, JSON.stringify([...telegramVIPs]));
+}
+
+// Проверка VIP
+function isVIPTelegram(userId) {
+    return telegramVIPs.has(userId);
+}
+
+// Загружаем при старте сервера
+loadVIPs();
 
 function broadcastQueue() {
     broadcast({
@@ -124,6 +258,16 @@ function stopYouTube(forceStop = false) {
     });
 }
 
+function formatCooldown(ms) {
+    const totalSec = Math.ceil(ms / 1000);
+    const min = Math.floor(totalSec / 60);
+    const sec = totalSec % 60;
+
+    if (min > 0 && sec > 0) return `${min} мин ${sec} сек`;
+    if (min > 0) return `${min} мин`;
+    return `${sec} сек`;
+}
+
 function pauseYouTube() {
     broadcast({
         event: 'music_pause'
@@ -144,6 +288,10 @@ function broadcast(event) {
 }
 
 function emit(event, platform, data = {}) {
+    if (event === 'chat') {
+        addToChatHistory(platform, data);
+    }
+
     broadcast({
         event,
         platform,
@@ -232,8 +380,8 @@ function getUnifiedCooldown({
 }) {
     if (isAnchor || isMod) return 0;
     if (isSubscriber) return 1 * 60 * 1000;
-    if (isFollower) return 5 * 60 * 1000;
-    return 10 * 60 * 1000;
+    if (isFollower) return 1 * 60 * 1000;
+    return 1 * 60 * 1000;
 }
 
 function getTikTokCooldown(userId, {
@@ -244,8 +392,8 @@ function getTikTokCooldown(userId, {
 }) {
     if (isAnchor || isMod) return 0;
     if (isSubscriber) return 1 * 60 * 1000;
-    if (isFollower) return 5 * 60 * 1000; // 👈 фолловеры
-    return 10 * 60 * 1000;
+    if (isFollower) return 1 * 60 * 1000; // 👈 фолловеры
+    return 1 * 60 * 1000;
 }
 
 async function handleSongRequest({
@@ -257,26 +405,21 @@ async function handleSongRequest({
     isAllowed = true
 }) {
     if (!isAllowed) return;
-
     const query = text.slice(6).trim();
     if (!query) return;
-
     const last = songQueue.lastRequest.get(`${platform}:${user}`) || 0;
     const now = Date.now();
-
     if (cooldownMs > 0 && now - last < cooldownMs) {
-        const sec = Math.ceil((cooldownMs - (now - last)) / 1000);
+        const remainingMs = cooldownMs - (now - last);
         emit('chat', platform, {
             userId,
             nickname: user,
-            text: `⏳ Подожди ${Math.ceil(sec / 60)} мин перед следующим заказом`
+            text: `⏳ ${user}, сможешь заказать ещё через ⏱: ${formatCooldown(remainingMs)}`
         });
         return;
     }
-
     let foundVideo;
     const videoId = extractYouTubeID(query);
-
     try {
         if (videoId) {
             const r = await yts({ videoId });
@@ -303,7 +446,7 @@ async function handleSongRequest({
         duration: foundVideo.seconds || 0 // ⏱ ДЛИТЕЛЬНОСТЬ В СЕКУНДАХ
     };
 
-    songQueue.add(song);
+    songQueue.add(song, isVIPTelegram(userId));
 
     emit('chat', platform, {
         userId,
@@ -311,37 +454,12 @@ async function handleSongRequest({
         text: `🎵 Добавлено: ${song.author} — ${song.title}`
     });
 
-    if (!songQueue.current) {
-        playYouTube(songQueue.next());
+    if (!songQueue.current && !songQueue.isEmpty()) {
+        const nextSong = songQueue.next();
+        if (nextSong) playYouTube(nextSong);
     } else {
         broadcastQueue();
     }
-}
-
-function getCooldownForUser(user, tags) {
-    // Для стримера и модераторов - без кулдауна
-    if (isBroadcaster(tags) || isModerator(tags)) {
-        return 0;
-    }
-    // Для VIP - уменьшенный кулдаун
-    if (isVIP(tags)) {
-        return 0; // 0 секунд
-    }
-    // Для подписчиков - стандартный кулдаун
-    if (isSubscriber(tags)) {
-    const tier = tags['badges']?.subscriber || '1';
-    switch(tier) {
-        case '3000': // Tier 3
-            return 10 * 1000; // 10 секунд
-        case '2000': // Tier 2
-            return 30 * 1000; // 30 секунд
-        case '1000': // Tier 1
-        default:
-            return 60 * 1000; // 1 минута
-    }
-}
-    // Для всех остальных - стандартный кулдаун (но они не смогут использовать !song)
-    return 5 * 60 * 1000;
 }
 
 /* =======================
@@ -371,31 +489,23 @@ async function main() {
     });
     console.log('✅ Terraria WS → ws://localhost:21214');
     wss.on('connection', ws => {
+        ws.send(JSON.stringify({ event: 'chatHistory', data: chatHistory }));
+
         ws.on('message', message => {
             try {
                 const d = JSON.parse(message);
-
                 if (d.event === 'trackEnded') {
-                    console.log('Трек завершился, ищем следующий...');
-                
-                    // Получаем следующий трек из очереди
                     const next = songQueue.next();
-                
-                    if (next) {
-                        console.log('Воспроизводим следующий:', next.title);
-                        playYouTube(next);
-                    } else {
-                        console.log('Очередь пуста, останавливаем воспроизведение');
-                        // Обычная остановка (без флага принудительной)
-                        stopYouTube(false);
-                    }
-                
+                    if (next) playYouTube(next);
+                    else stopYouTube(false);
                     broadcastQueue();
                 }
             } catch (err) {
                 console.error('WS message error:', err);
             }
         });
+
+        ws.on('close', () => console.log('Client disconnected from WS'));
     });
 
     /* ---------- HTTP (Twitch EventSub) ---------- */
@@ -442,6 +552,170 @@ async function main() {
         res.status(200).end();
     });
 
+    async function getTelegramRole(msg) {
+        // Личка = broadcaster
+        if (msg.chat.type === 'private' && msg.from.id === OWNER_ID) {
+            return 'broadcaster';
+        }
+
+        try {
+            const member = await tgBot.getChatMember(
+                msg.chat.id,
+                msg.from.id
+            );
+
+            if (member.status === 'creator') return 'broadcaster';
+            if (member.status === 'administrator') return 'moderator';
+
+        } catch (e) {
+            console.error('TG role check error:', e.message);
+        }
+
+        return 'user';
+    }
+
+    /* ---------- Telegram Bot ---------- */
+    try {
+        tgBot = new TelegramBot(process.env.TG_BOT_TOKEN, {
+            polling: true
+        });
+
+        console.log('✅ Telegram Bot connected');
+        setTimeout(() => {
+            emit('chat', 'telegram', {
+                userId: `system`,
+                nickname: `Telegram`,
+                text: '✅ Telegram Bot connected'
+            });
+        }, 2000);
+
+        tgBot.on('message', async msg => {
+            if (!msg.text) return;
+            const chatId = msg.chat.id;   // ✅ ДОБАВИТЬ
+            const fromId = msg.from.id;   // ✅ ДОБАВИТЬ
+            const userId = fromId;        // можно оставить для читаемости
+            const user = msg.from.username || msg.from.first_name;
+            let text = msg.text.trim();
+            const role = await getTelegramRole(msg);
+
+            // === Команды управления VIP ===
+            if (role === 'broadcaster' || role === 'moderator') {
+                // Добавить VIP
+                if (text.startsWith('/vip ')) {
+                    const targetId = parseInt(text.split(' ')[1]);
+                    if (!isNaN(targetId)) {
+                        telegramVIPs.add(targetId);
+                        saveVIPs();
+                        tgBot.sendMessage(chatId, `✅ Пользователь ${targetId} теперь VIP!`);
+                    } else {
+                        tgBot.sendMessage(chatId, `❌ Неверный ID`);
+                    }
+                    return;
+                }
+
+                // Удалить VIP
+                if (text.startsWith('/unvip ')) {
+                    const targetId = parseInt(text.split(' ')[1]);
+                    if (!isNaN(targetId) && telegramVIPs.has(targetId)) {
+                        telegramVIPs.delete(targetId);
+                        saveVIPs();
+                        tgBot.sendMessage(chatId, `❌ Пользователь ${targetId} больше не VIP`);
+                    } else {
+                        tgBot.sendMessage(chatId, `❌ Пользователь не найден в VIP`);
+                    }
+                    return;
+                }
+
+                // Список VIP
+                if (text === '/viplist') {
+                    if (telegramVIPs.size === 0) {
+                        tgBot.sendMessage(chatId, `VIP-пользователей нет`);
+                    } else {
+                        tgBot.sendMessage(chatId, `🌟 VIP:\n${[...telegramVIPs].join('\n')}`);
+                    }
+                    return;
+                }
+            }
+
+            // --- Telegram → обычные команды ---
+            for (const tgCmd in TELEGRAM_COMMAND_MAP) {
+                if (text === tgCmd || text.startsWith(tgCmd + ' ')) {
+                    text = text.replace(tgCmd, TELEGRAM_COMMAND_MAP[tgCmd]);
+                    break;
+                }
+            }
+
+            /* ===== SONG REQUEST ===== */
+            if (text.startsWith('!song ')) {
+                // VIP обходит кулдаун
+                const cooldownMs = isVIPTelegram(fromId) ? 0 : getUnifiedCooldown({
+                    isAnchor: role === 'broadcaster',
+                    isMod: role === 'moderator',
+                    isSubscriber: false,
+                    isFollower: false
+                });
+
+                await handleSongRequest({
+                    platform: 'telegram',
+                    user: msg.from.username || msg.from.first_name,
+                    userId: fromId,
+                    role,
+                    text,
+                    cooldownMs
+                });
+                return;
+            }
+
+            /* ===== SKIP ===== */
+            if (text === '!skip') {
+                if (role === 'user') {
+                    tgBot.sendMessage(msg.chat.id, '⛔ Только для модераторов');
+                    return;
+                }
+
+                stopYouTube(true);
+                songQueue.current = null;
+
+                const next = songQueue.next();
+                if (next) playYouTube(next);
+
+                broadcastQueue();
+                return;
+            }
+
+            /* ===== PAUSE ===== */
+            if (text === '!pause' || text === '!play') {
+                if (role === 'user') {
+                    tgBot.sendMessage(msg.chat.id, '⛔ Недостаточно прав');
+                    return;
+                }
+
+                text === '!pause'
+                    ? pauseYouTube()
+                    : resumeYouTube();
+
+                return;
+            }
+
+            /* ===== обычный чат ===== */
+            emit('chat', 'telegram', {
+                userId,
+                nickname: `[TG] ${user}`,
+                text
+            });
+        });
+
+    } catch (err) {
+        console.error('⚠ Telegram connection failed:', err.message);
+        setTimeout(() => {
+            emit('chat', 'telegram', {
+                userId: `system`,
+                nickname: `Telegram`,
+                text: `⚠ Telegram connection failed: ${err.message}`
+            });
+        }, 2000);
+    }
+
     /* ---------- Twitch Chat ---------- */
     try {
         const twitch = new tmi.Client({
@@ -458,10 +732,11 @@ async function main() {
             announcer.sendRandom();
         }, 10 * 60 * 1000);
         console.log('✅ Twitch Chat connected');
+        announceStreamStart('twitch');
         emit('chat', 'twitch', {
             userId: `system`,
             nickname: `Twitch`,
-            text: `Connected`
+            text: `✅ Twitch Chat connected`
         });
 
         twitch.on('message', async (_, tags, msg, self) => {
@@ -600,6 +875,10 @@ async function main() {
             // ===== обычный чат =====
             if (!twitchSeen.has(user)) {
                 twitchSeen.add(user);
+                if (twitchSeen.size > 1000) {
+                    const first = twitchSeen.values().next().value;
+                    twitchSeen.delete(first);
+                }
                 emit('join', 'twitch', {
                     userId: tags['user-id'],
                     nickname: formatNickname('twitch', user)
@@ -643,6 +922,7 @@ async function main() {
             enableExtendedGiftInfo: true
         });
         await tt.connect();
+        announceStreamStart('tiktok');
         console.log('✅ TikTok connected');
         emit('chat', 'tiktok', {
             userId: `system`,
@@ -814,15 +1094,7 @@ async function main() {
             // Добавляем пользователя в Map лайков, если ещё нет
             if (!tiktokLikes.has(userId)) tiktokLikes.set(userId, 0);
             // Отправляем через WebSocket
-            emit('gift', 'tiktok', {
-                userId,
-                nickname: formatNickname('tiktok', baseName, userId),
-                gift: {
-                    name: giftName,
-                    icon: giftIcon
-                },
-                amount: d.repeatCount || 1
-            });
+            handleAggregatedGift(userId, baseName, giftName, giftIcon, d.repeatCount || 1);
         });
 
         tt.on(WebcastEvent.LIKE, d => {
@@ -889,6 +1161,7 @@ async function main() {
                 nickname: `YouTube`,
                 text: `✅ YouTube Live Chat started`
             });
+            announceStreamStart('youtube');
         });
         yt.on('end', () => {
             console.log('❌ YouTube Live Chat ended');
@@ -999,52 +1272,52 @@ async function main() {
                 return;
             }
 
+            // ===== PAUSE =====
+            if (messageText === '!pause') {
+                if (!isAnchor && !isMod) {
+                    emit('chat', 'youtube', {
+                        userId,
+                        nickname: formatNickname('youtube', chatItem.author.name),
+                        text: `❌ Команда !pause доступна только модераторам и стримеру`
+                    });
+                    return;
+                }
+
+                pauseYouTube();
+                emit('chat', 'youtube', {
+                    userId,
+                    nickname: formatNickname('youtube', chatItem.author.name),
+                    text: `⏸ Трек поставлен на паузу`
+                });
+                return;
+            }
+
+            // ===== PLAY =====
+            if (messageText === '!play') {
+                if (!isAnchor && !isMod) {
+                    emit('chat', 'youtube', {
+                        userId,
+                        nickname: formatNickname('youtube', chatItem.author.name),
+                        text: `❌ Команда !play доступна только модераторам и стримеру`
+                    });
+                    return;
+                }
+
+                resumeYouTube();
+                emit('chat', 'youtube', {
+                    userId,
+                    nickname: formatNickname('youtube', chatItem.author.name),
+                    text: `▶️ Продолжаем воспроизведение`
+                });
+                return;
+            }
+
             emit('chat', 'youtube', {
                 userId,
                 nickname: formatNickname('youtube', chatItem.author.name),
                 text: messageText
             });
         });
-
-        // ===== PAUSE =====
-        if (messageText === '!pause') {
-            if (!isAnchor && !isMod) {
-                emit('chat', 'youtube', {
-                    userId,
-                    nickname: formatNickname('youtube', chatItem.author.name),
-                    text: `❌ Команда !pause доступна только модераторам и стримеру`
-                });
-                return;
-            }
-
-            pauseYouTube();
-            emit('chat', 'youtube', {
-                userId,
-                nickname: formatNickname('youtube', chatItem.author.name),
-                text: `⏸ Трек поставлен на паузу`
-            });
-            return;
-        }
-
-        // ===== PLAY =====
-        if (messageText === '!play') {
-            if (!isAnchor && !isMod) {
-                emit('chat', 'youtube', {
-                    userId,
-                    nickname: formatNickname('youtube', chatItem.author.name),
-                    text: `❌ Команда !play доступна только модераторам и стримеру`
-                });
-                return;
-            }
-
-            resumeYouTube();
-            emit('chat', 'youtube', {
-                userId,
-                nickname: formatNickname('youtube', chatItem.author.name),
-                text: `▶️ Продолжаем воспроизведение`
-            });
-            return;
-        }
 
         yt.on('superchat', scItem => {
             emit('gift', 'youtube', {
@@ -1072,7 +1345,6 @@ async function main() {
             nickname: `YouTube`,
             text: `⚠ YouTube connection failed`
         });
-
     }
 
 }
