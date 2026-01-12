@@ -142,47 +142,6 @@ function getYouTubeRoles(raw) {
     };
 }
 
-function handleAggregatedGift(userId, nickname, giftName, giftIcon, amount = 1) {
-    const key = `${userId}:${giftName}`;
-    let entry = aggregatedGifts.get(key);
-
-    if (entry) {
-        // Увеличиваем количество и перемещаем в конец истории
-        entry.amount += amount;
-
-        // Обновляем текст
-        entry.text = `${nickname} подарил${entry.amount > 1 ? ` ${entry.amount}×` : ''} ${giftName}`;
-
-        // Перемещаем в конец истории
-        const idx = chatHistory.findIndex(m => m._giftKey === key);
-        if (idx !== -1) chatHistory.splice(idx, 1); // удаляем старое сообщение
-        chatHistory.push({ platform: 'tiktok', userId, nickname, text: entry.text, _giftKey: key });
-    } else {
-        // Создаём новое сообщение
-        entry = {
-            amount,
-            text: `${nickname} подарил ${giftName}`
-        };
-        aggregatedGifts.set(key, entry);
-        chatHistory.push({ platform: 'tiktok', userId, nickname, text: entry.text, _giftKey: key });
-    }
-
-    // Ограничиваем историю чата
-    if (chatHistory.length > CHAT_HISTORY_LIMIT) chatHistory.shift();
-
-    // Отправляем обновлённое сообщение через WebSocket
-    broadcast({
-        event: 'gift',
-        platform: 'tiktok',
-        data: {
-            userId,
-            nickname,
-            gift: { name: giftName, icon: giftIcon },
-            amount: entry.amount
-        }
-    });
-}
-
 function addToChatHistory(platform, data) {
     chatHistory.push({ platform, ...data });
     if (chatHistory.length > CHAT_HISTORY_LIMIT) chatHistory.shift();
@@ -1104,26 +1063,32 @@ async function main() {
         });
 
         tt.on(WebcastEvent.GIFT, d => {
-            const userId = d.user.userId;
-            const baseName = d.user.nickname;
-            // Основные источники: giftDetails + extendedGiftInfo
             const giftName =
                 d.giftDetails?.giftName ||
                 d.extendedGiftInfo?.name ||
                 'Подарок';
-            // Иконка подарка — строим полный URL
-            let giftIconUri =
-                d.giftDetails?.icon?.uri ||
-                d.extendedGiftInfo?.icon?.uri ||
-                null;
-            // TikTok CDN требует базовый URL
-            const giftIcon = giftIconUri ?
-                `https://p16-webcast.tiktokcdn.com/img/maliva/${giftIconUri}` + `~tplv-obj.webp` :
-                null;
-            // Добавляем пользователя в Map лайков, если ещё нет
-            if (!tiktokLikes.has(userId)) tiktokLikes.set(userId, 0);
-            // Отправляем через WebSocket
-            handleAggregatedGift(userId, baseName, giftName, giftIcon, d.repeatCount || 1);
+
+            const giftIconUri =
+                d.giftDetails?.giftIcon?.uri ||
+                d.extendedGiftInfo?.icon?.uri;
+
+            const giftIcon = giftIconUri
+                ? `https://p16-webcast.tiktokcdn.com/img/maliva/${giftIconUri}~tplv-obj.webp`
+                : null;
+
+            broadcast({
+                event: 'gift',
+                platform: 'tiktok',
+                data: {
+                    userId: d.user.userId,
+                    nickname: d.user.nickname,
+                    gift: {
+                        name: giftName,
+                        icon: giftIcon
+                    },
+                    amount: d.repeatCount || 1
+                }
+            });
         });
 
         tt.on(WebcastEvent.LIKE, d => {
