@@ -35,7 +35,7 @@ body {
   top: 0;
   z-index: 100;
   backdrop-filter: blur(5px);
-  padding: 0px 10px;
+  box-shadow: 1px 10px 10px rgba(0,0,0,0.8);
 }
 
 /* ===== CHAT SECTION ===== */
@@ -84,8 +84,8 @@ body {
 .telegram .icon { color: #2AABEE; }
 
 .error {
-  background: rgba(255,80,80,0.3);
-  color: #ffb3b3;
+  background: rgba(151, 31, 31, 0.8);
+  border-left: 5px solid #a10a0a;
 }
 
 /* ===== Text ===== */
@@ -268,6 +268,21 @@ body {
 #log::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.5);
 }
+
+.gift-message {
+  border-left: 10px solid #2d8fbf;
+  background: rgba(10, 10, 50, 0.8);
+}
+
+.msg.tiktok.follow {
+  border-left: 10px solid #03AC03;
+  background: rgba(20, 50, 20, 0.8);
+}
+
+.msg[data-user-id="system"] {
+  border-left: 5px solid #cf79ff;
+  background: rgba(48, 26, 98, 0.8);
+}
 </style>
 </head>
 
@@ -339,6 +354,11 @@ let songQueueDisplay = {
 let player;
 let progressInterval;
 let currentVideoDuration = 0;
+
+function getGiftMap(el) {
+  if (!el._gifts) el._gifts = new Map();
+  return el._gifts;
+}
 
 // Форматирование времени
 function formatTime(seconds) {
@@ -506,8 +526,9 @@ function scrollChatToBottom() {
 
 // В функции logMessage добавьте вызов автоскролла
 function logMessage(platform, userId, nickname, text, isError = false, extraClass = '') {
+  const isSystem = nickname === 'System' || platform === 'WS';
   const el = document.createElement('div');
-  el.className = `msg ${platform} ${isError ? 'error' : ''} ${extraClass}`;
+  el.className = `msg ${platform} ${isError ? 'error' : ''} ${isSystem ? 'system' : ''} ${extraClass}`;
   el.dataset.userId = userId;
 
   el.innerHTML = `
@@ -702,16 +723,60 @@ ws.onmessage = e => {
       logMessage(d.platform, d.data.userId, d.data.nickname, d.data.text);
 
     if (d.event === 'gift') {
-      console.log('GIFT RECEIVED', d);
-      const g = d.data.gift || {};
-      const amount = d.data.amount ?? 1;
-      const giftHtml =
-        '<div class="gift">' +
-        (g.icon ? '<img src="' + g.icon + '" />' : '🎁') +
-        '<span class="gift-name">' + (g.name || 'Подарок') + '</span>' +
-        ' ×' + amount +
-        '</div>';
-        logMessage(d.platform, d.data.userId, d.data.nickname, giftHtml, false, 'gift');
+        console.log('GIFT RECEIVED', d);
+
+        const { userId, nickname, gift, amount = 1 } = d.data;
+        const giverId = 'giver_' + userId;
+
+        let giver = document.getElementById(giverId);
+
+        // 🆕 если первый подарок от зрителя
+        if (!giver) {
+            giver = document.createElement('div');
+            giver.className = 'msg gift-message';
+            giver.id = giverId;
+
+            giver.innerHTML =
+                '<div class="content">' +
+                  '<div class="nick">' + nickname + '</div>' +
+                  '<div class="gift-list"></div>' +
+                '</div>';
+
+            logEl.appendChild(giver);
+        }
+
+        const giftList = giver.querySelector('.gift-list');
+        const gifts = getGiftMap(giver);
+
+        const giftKey = gift?.name || 'Подарок';
+
+        let entry = gifts.get(giftKey);
+
+        if (!entry) {
+            entry = {
+                amount: 0,
+                el: document.createElement('div')
+            };
+
+            entry.el.className = 'gift';
+            entry.el.innerHTML =
+                (gift?.icon
+                    ? '<img src="' + gift.icon + '" />'
+                    : '🎁') +
+                '<span class="gift-name">' + giftKey + '</span>' +
+                ' ×<span class="gift-count">0</span>';
+
+            giftList.appendChild(entry.el);
+            gifts.set(giftKey, entry);
+        }
+
+        entry.amount += amount;
+        entry.el.querySelector('.gift-count').textContent = entry.amount;
+
+        // 🔽 перемещаем зрителя вниз чата
+        logEl.appendChild(giver);
+
+        scrollChatToBottom();
     }
 
     if (d.event === 'share')
