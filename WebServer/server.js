@@ -45,8 +45,7 @@ class SongQueue {
     }
 
     next() {
-        if (!this.current) this.current = this.queue.shift() || null;
-        else this.current = this.queue.shift() || null;
+        this.current = this.queue.shift() || null;
         return this.current;
     }
 
@@ -120,6 +119,23 @@ app.listen(3000, () => {
 /* =======================
 WEBSOCKET → TERRARIA
 ======================= */
+
+function canUserSkipCurrentSong({ platform, user, userId, tags = null, role = null }) {
+    // Нет трека — нечего скипать
+    if (!songQueue.current) return false;
+
+    // Модераторы / стример — всегда можно
+    if (tags) {
+        if (isModerator(tags) || isBroadcaster(tags)) return true;
+    }
+
+    if (role) {
+        if (role === 'moderator' || role === 'broadcaster') return true;
+    }
+
+    // Обычный пользователь может скипнуть ТОЛЬКО свой трек
+    return songQueue.current.requesterId === `${platform}:${userId}`;
+}
 
 function parseYouTubeMessageText(raw) {
     if (!Array.isArray(raw.message)) return '';
@@ -423,7 +439,7 @@ async function handleSongRequest({
     songQueue.lastRequest.set(`${platform}:${user}`, now);
 
     const song = {
-        user,
+        requesterId: `${platform}:${userId}`,
         requester: user,
         title: foundVideo.title,
         videoId: foundVideo.videoId,
@@ -656,8 +672,18 @@ async function main() {
 
             /* ===== SKIP ===== */
             if (text === '!skip') {
-                if (role === 'user') {
-                    tgBot.sendMessage(msg.chat.id, '⛔ Только для модераторов');
+                const allowed = canUserSkipCurrentSong({
+                    platform: 'telegram',
+                    user,
+                    userId,
+                    role
+                });
+                if (!allowed) {
+                    await tgBot.sendMessage(
+                        TELEGRAM_CHANNEL_ID,
+                        `❌ ${user}, ты можешь скипать только свой текущий трек`,
+                        { disable_web_page_preview: false }
+                    );
                     return;
                 }
 
@@ -756,17 +782,25 @@ async function main() {
             // ===== SKIP =====
             if (text === '!skip') {
                 // Проверяем права на использование команды
-                if (!canSkipOrStop(tags)) {
-                    twitch.say(STREAMER, `❌ ${user}, команда !skip доступна только модераторам и стримеру!`);
+                const allowed = canUserSkipCurrentSong({
+                    platform: 'twitch',
+                    user,
+                    userId: tags['user-id'],
+                    tags
+                });
+
+                if (!allowed) {
+                    twitch.say(
+                        STREAMER,
+                        `❌ ${user}, ты можешь скипать только свой текущий трек`
+                    );
                     return;
                 }
 
                 // Останавливаем текущий трек с флагом принудительной остановки
                 stopYouTube(true);
-    
                 // Очищаем текущий трек
                 songQueue.current = null;
-    
                 // Получаем следующий трек из очереди
                 const next = songQueue.next();
     
@@ -964,13 +998,19 @@ async function main() {
 
             // ===== SKIP =====
             if (text === '!skip') {
-                if (!canSkipStop) {
+                const allowed = canUserSkipCurrentSong({
+                    platform: 'tiktok',
+                    user,
+                    userId,
+                    role: isMod ? 'moderator' : isAnchor ? 'broadcaster' : 'user'
+                });
+                if (!allowed) {
                     emit('chat', 'tiktok', {
                         userId,
                         nickname: formatNickname('tiktok', user, userId),
-                        text: `❌ ${user}, команда !skip доступна только модераторам и стримеру!`
+                        text: `❌ ${user}, ты можешь скипать только свой текущий трек`
                     });
-                    return;
+                    return; // 🔴 ОБЯЗАТЕЛЬНО
                 }
 
                 stopYouTube(true);
@@ -1242,11 +1282,17 @@ async function main() {
 
             /* ===== SKIP ===== */
             if (messageText === '!skip') {
-                if (!isAnchor && !isMod) {
+                const allowed = canUserSkipCurrentSong({
+                    platform: 'youtube',
+                    user: username,
+                    userId,
+                    role: isAnchor ? 'broadcaster' : isMod ? 'moderator' : 'user'
+                });
+                if (!allowed) {
                     emit('chat', 'youtube', {
                         userId,
                         nickname: formatNickname('youtube', username),
-                        text: `❌ ${username}, команда !skip доступна только модераторам и стримеру`
+                        text: `❌ ${username}, ты можешь скипать только свой текущий трек`
                     });
                     return;
                 }
