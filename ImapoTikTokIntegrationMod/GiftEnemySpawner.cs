@@ -7,10 +7,8 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using Terraria;
-using Terraria.DataStructures;
 using Terraria.GameContent;
 using Terraria.Graphics.Effects;
-using Terraria.Graphics.Shaders;
 using Terraria.ID;
 using Terraria.ModLoader;
 
@@ -194,21 +192,25 @@ namespace ImapoTikTokIntegrationMod
         }
 
         private enum BossState { Idle, Countdown, ActiveBoss, Recovering }
-
         private static readonly Queue<(BossDefinition boss, string giverName, int coins)> _queue = new();
-        private static BossState _state = BossState.Idle;
-
         private static BossDefinition _currentBoss;
         private static string _currentGiver;
         private static int _currentCoins;
-
         private static int _currentBossNpcWhoAmI = -1;
-
-        public static bool IsBusy => _state != BossState.Idle;
-
+        private static readonly object _queueLock = new();
+        private static volatile BossState _state = BossState.Idle;
+        private static bool playerDead = false;
+        public static void OnPlayerDeath(Player player)
+        {
+            playerDead = true;
+        }
         public static void EnqueueBoss(BossDefinition boss, string giverName, int coins)
         {
-            _queue.Enqueue((boss, giverName, coins));
+            lock (_queueLock)
+            {
+                _queue.Enqueue((boss, giverName, coins));
+            }
+
             TryStartNext();
         }
 
@@ -220,13 +222,20 @@ namespace ImapoTikTokIntegrationMod
             if (_state != BossState.Idle)
                 return;
 
-            if (_queue.Count == 0)
+            if (playerDead) // если игрок мёртв — откладываем старт
                 return;
 
-            var item = _queue.Dequeue();
-            _currentBoss = item.boss;
-            _currentGiver = item.giverName;
-            _currentCoins = item.coins;
+            (BossDefinition boss, string giver, int coins)? item = null;
+            lock (_queueLock)
+            {
+                if (_queue.Count > 0)
+                    item = _queue.Dequeue();
+            }
+            if (item == null) return;
+
+            _currentBoss = item.Value.boss;
+            _currentGiver = item.Value.giver;
+            _currentCoins = item.Value.coins;
             _currentBossNpcWhoAmI = -1;
 
             StartPreparation(isRespawnRecovery: false);
@@ -236,27 +245,34 @@ namespace ImapoTikTokIntegrationMod
         {
             if (Main.netMode == NetmodeID.MultiplayerClient)
                 return;
-
-            if (player == null || !player.active)
+            if (player == null || !player.active || player.dead)
                 return;
 
-            // Если игрок мёртв — ничего не делаем, подготовка отложится до появления
-            if (player.dead)
-                return;
+            playerDead = false;
 
-            Main.QueueMainThreadAction(async () =>
+            Task.Run(async () =>
             {
-                // Ждём 1 секунду, чтобы игрок полностью загрузился
                 await Task.Delay(1000);
 
-                if (IsCurrentBossAlive())
+                Main.QueueMainThreadAction(() =>
                 {
-                    StartPreparation(isRespawnRecovery: true);
-                    return;
-                }
-
-                ResetToIdle();
-                TryStartNext();
+                    try
+                    {
+                        if (IsCurrentBossAlive())
+                        {
+                            StartPreparation(isRespawnRecovery: true);
+                        }
+                        else
+                        {
+                            ResetToIdle();
+                            TryStartNext();
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Main.NewText($"Ошибка при возобновлении босса: {ex.Message}", Color.Red);
+                    }
+                });
             });
         }
 
@@ -481,29 +497,25 @@ namespace ImapoTikTokIntegrationMod
             {
                 _currentBossNpcWhoAmI = npcId;
                 GiftNpcTracker.Register(npcId);
-
                 NPC npc = Main.npc[npcId];
                 npc.target = player.whoAmI;
-
                 // Привязываем “дарителя/монеты” к боссу (чтобы текст/награды работали одинаково)
                 var gift = npc.GetGlobalNPC<GiftFlyingFishGlobal>();
                 gift.giverName = _currentGiver;
                 gift.goldInside = _currentCoins;
-
                 npc.netUpdate = true;
-
-                int queuedBossesLeft = _queue.Count; // сколько боссов осталось ждать ПОСЛЕ этого
-
+                int queuedBossesLeft;
+                lock (_queueLock)
+                {
+                    queuedBossesLeft = _queue.Count; // безопасно
+                }
                 Main.NewText(
                     $"!!! {_currentGiver} вызывает босса: {_currentBoss.DisplayName} [в очереди: {queuedBossesLeft}]",
                     Color.OrangeRed
                 );
             }
-
             DisableMoonLordDistortion();
-
             _state = BossState.ActiveBoss;
-
             // Мониторим смерть/деспавн босса таймером (простая проверка)
             _ = MonitorBossAsync();
         }
@@ -529,6 +541,7 @@ namespace ImapoTikTokIntegrationMod
             _currentGiver = null;
             _currentCoins = 0;
             _currentBossNpcWhoAmI = -1;
+
             BossCountdownSystem.Active = false;
             BossCountdownSystem.Timer = 0;
             BossCountdownSystem.BossName = null;
@@ -992,10 +1005,10 @@ namespace ImapoTikTokIntegrationMod
             NPCID.BigMimicJungle,
         };
 
-        // ================================
-        // ====== Tier5/6 Boss Pools ======
-        // ================================
-        private static readonly BossDefinition[] Tier5Bosses_PreHard = new[]
+    // ================================
+    // ====== Tier5/6 Boss Pools ======
+    // ================================
+    private static readonly BossDefinition[] Tier5Bosses_PreHard = new[]
         {
             new BossDefinition {
                 NpcType = NPCID.SandElemental, DisplayName = "Песчаный элементаль",
@@ -1152,46 +1165,67 @@ namespace ImapoTikTokIntegrationMod
         private static readonly Queue<QueueItem> SpawnQueue = new();
         private static int ActiveSpawned = 0;
         private const int MaxActive = 10;
+        private static bool _spawningInProgress = false;
+        private static readonly object _spawnQueueLock = new(); // блокировка для SpawnQueue
 
         // ================================
         // ====== PUBLIC API ==============
         // ================================
         public static void SpawnGiftEnemy(string giverName, int giftCount, int giftPrice)
         {
-            // 1 подарок = 1 элемент очереди. giftCount обрабатывай снаружи циклом.
-            SpawnQueue.Enqueue(new QueueItem
+            lock (_spawnQueueLock)
             {
-                GiverName = giverName,
-                GiftPrice = giftPrice
-            });
+                // 1 подарок = 1 элемент очереди. giftCount обрабатывай снаружи циклом.
+                SpawnQueue.Enqueue(new QueueItem
+                {
+                    GiverName = giverName,
+                    GiftPrice = giftPrice
+                });
+            }
 
             TrySpawnNext();
         }
 
         // ================================
-        // ====== QUEUE PROCESS ===========
+        // ====== QUEUE PROCESS ============
         // ================================
         private static void TrySpawnNext()
         {
             if (Main.netMode == NetmodeID.MultiplayerClient)
                 return;
 
+            lock (_spawnQueueLock)
+            {
+                if (_spawningInProgress)
+                    return; // уже идёт цикл
+                _spawningInProgress = true;
+            }
+
             Main.QueueMainThreadAction(async () =>
             {
-                while (SpawnQueue.Count > 0)
+                await Task.Yield(); // небольшой yield, чтобы не блокировать главный поток
+
+                while (true)
                 {
-                    if (ActiveSpawned >= MaxActive)
-                        return;
+                    QueueItem item;
+
+                    lock (_spawnQueueLock)
+                    {
+                        if (SpawnQueue.Count == 0 || ActiveSpawned >= MaxActive)
+                        {
+                            _spawningInProgress = false;
+                            return;
+                        }
+
+                        item = SpawnQueue.Dequeue();
+                    }
 
                     Player player = Main.LocalPlayer;
                     if (player == null || !player.active || player.dead)
                     {
-                        // ждем игрока 1 секунду, потом пробуем снова
                         await Task.Delay(1000);
                         continue;
                     }
-
-                    var item = SpawnQueue.Peek();
 
                     int coins = item.GiftPrice;
 
@@ -1199,10 +1233,8 @@ namespace ImapoTikTokIntegrationMod
                     {
                         var boss = PickBossByCoinsPublic(coins);
                         if (boss != null)
-                        {
                             BossQueueManager.EnqueueBoss(boss, item.GiverName, coins);
-                        }
-                        SpawnQueue.Dequeue();
+
                         continue;
                     }
 
@@ -1211,14 +1243,10 @@ namespace ImapoTikTokIntegrationMod
                     int spawnY = (int)player.Center.Y - 300;
 
                     int npcId = NPC.NewNPC(player.GetSource_FromThis(), spawnX, spawnY, npcType);
-
                     if (npcId < 0)
                         continue;
 
                     GiftNpcTracker.Register(npcId);
-
-                    if (npcId < 0)
-                        continue;
 
                     NPC npc = Main.npc[npcId];
                     npc.target = player.whoAmI;
@@ -1235,7 +1263,11 @@ namespace ImapoTikTokIntegrationMod
 
                     npc.netUpdate = true;
 
-                    int queuedLeft = SpawnQueue.Count; // сколько ещё ждёт
+                    int queuedLeft;
+                    lock (_spawnQueueLock)
+                    {
+                        queuedLeft = SpawnQueue.Count;
+                    }
 
                     Main.NewText(
                         $"{item.GiverName} призвал {Lang.GetNPCNameValue(npcType)} ({coins} монет) [в очереди: {queuedLeft}]",
@@ -1246,8 +1278,6 @@ namespace ImapoTikTokIntegrationMod
 
                     GiftFlyingFishGlobal.OnGiftEnemyKilled -= HandleEnemyKilled;
                     GiftFlyingFishGlobal.OnGiftEnemyKilled += HandleEnemyKilled;
-
-                    SpawnQueue.Dequeue();
                 }
             });
         }
@@ -1266,6 +1296,12 @@ namespace ImapoTikTokIntegrationMod
 
         private static int PickEnemyByCoins(int coins)
         {
+            // Специальная логика: 1 монета в хардмоде => сильный моб
+            if (coins >= 1 && Main.hardMode)
+            {
+                return Pick(Tier4Enemies);
+            }
+
             if (coins <= 5) return Pick(Tier1Enemies);
             if (coins <= 10) return Pick(Tier2Enemies);
             if (coins <= 20) return Pick(Tier3Enemies);

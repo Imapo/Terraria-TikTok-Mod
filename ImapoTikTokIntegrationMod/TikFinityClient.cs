@@ -11,6 +11,7 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Globalization;
 using Terraria;
 using Terraria.ID;
 using Terraria.ModLoader;
@@ -30,6 +31,7 @@ public class TikFinityClient : ModSystem
     private static bool _hasShownStreamerName = false;
     private static Dictionary<string, int> likeComboCounter = new Dictionary<string, int>();
     private const string ModDataFolderName = "ImapoTikTokIntegrationModBD";
+    internal static bool worldLoaded = false;
     private static string GetModDataRoot()
     {
         return Path.Combine(Main.SavePath, ModDataFolderName);
@@ -125,10 +127,12 @@ public class TikFinityClient : ModSystem
         ImportSubscriberDatabase();
         ImportModeratorDatabase();
         StartClient();
+        worldLoaded = true;
     }
 
     public override void OnWorldUnload()
     {
+        worldLoaded = false;
         StopClientAsync().ConfigureAwait(false);
         UpdateViewerDatabaseJson();
         veteranSpawnedThisSession.Clear();
@@ -157,13 +161,19 @@ public class TikFinityClient : ModSystem
 
     private void HandleMessageWrapper(string json)
     {
+        if (!worldLoaded)
+        {
+            // Игнорируем все сообщения TikTok, пока мир не загружен
+            return;
+        }
         try
         {
             HandleMessage(json);
         }
         catch (Exception ex)
         {
-            Main.NewText($"[TikFinity ERROR] Failed to handle message: {ex}", 255, 0, 0);
+            ModContent.GetInstance<ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>()
+                .Logger.Warn($"[Parse Error] Wrapper error: {ex.Message}");
         }
     }
 
@@ -244,130 +254,177 @@ public class TikFinityClient : ModSystem
 
     private void HandleMessage(string json)
     {
+        // ===== PRE-FILTER (самое важное) =====
+        if (string.IsNullOrWhiteSpace(json))
+            return;
+
+        json = json.Trim();
+
+        if (json.Length < 2)
+            return;
+
+        // Tikfinity иногда шлёт мусор: "15k", "ok", "ping" и т.п.
+        if (json[0] != '{' && json[0] != '[')
+        {
+            ModContent.GetInstance<ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>()
+                .Logger.Debug($"[Tikfinity] Skipped non-JSON: {json}");
+            return;
+        }
+
+        JsonDocument doc;
         try
         {
-            using var doc = JsonDocument.Parse(json);
-            var root = doc.RootElement;
-
-            string platform = root.GetProperty("platform").GetString();
-            string eventType = root.TryGetProperty("event", out var ev) ? ev.GetString() : "";
-            JsonElement data = root.TryGetProperty("data", out var d) ? d : root;
-
-            if (eventType == "roomUser" && !_hasShownStreamerName)
-            {
-                // Попробуем извлечь tikfinityUsername из корня сообщения
-                if (root.TryGetProperty("tikfinityUsername", out var streamerNameElem) &&
-                    !string.IsNullOrEmpty(streamerNameElem.GetString()))
-                {
-                    string streamerName = streamerNameElem.GetString().Trim();
-                    SetStreamer(streamerName);
-                }
-                else if (root.TryGetProperty("data", out var dataNested) && data.ValueKind == JsonValueKind.Object)
-                {
-                    if (data.TryGetProperty("tikfinityUsername", out var nameFromData) &&
-                        !string.IsNullOrEmpty(nameFromData.GetString()))
-                    {
-                        string streamerName = nameFromData.GetString().Trim();
-                        SetStreamer(streamerName);
-                    }
-                }
-            }
-
-            string key = ExtractViewerKey(data);
-            string nickname = ExtractNickname(data);
-
-            ExtractUserFlags(root, out bool isSubscriber, out bool isModerator, out bool isFollowing);
-            ModContent.GetInstance<global::ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>()
-            .Logger.Info($"[Tikfinity RAW] {json}");
-
-            if (string.IsNullOrWhiteSpace(key))
-                return;
-
-            switch (eventType)
-            {
-                case "join":
-                case "roomUser":
-                case "member":
-                case "":
-                    HandleJoinEvent(key, nickname);
-                    AddOrUpdateViewer(key, nickname, isSubscriber, isModerator, isFollowing, eventType ?? "Unknown");
-                    /*
-                        if (platform == "youtube")
-                        {
-                            Main.QueueMainThreadAction(() =>
-                            {
-                                string messageText = ExtractCommentText(data);
-                                if (!string.IsNullOrWhiteSpace(messageText))
-                                {
-                                    // Вывод в чат
-                                    string chatMessage = $"[YouTube] {nickname}: {messageText}";
-                                    if (Main.netMode == NetmodeID.SinglePlayer)
-                                        Main.NewText(chatMessage, 255, 255, 0);
-                                    else if (Main.netMode == NetmodeID.Server)
-                                        Terraria.Chat.ChatHelper.BroadcastChatMessage(
-                                            Terraria.Localization.NetworkText.FromLiteral(chatMessage),
-                                            new Color(255, 255, 0)
-                                        );
-
-                                    // Спавн Firefly (аналог TikTok)
-                                    SpawnCommentFirefly(nickname, messageText);
-                                }
-                            });
-                        }
-
-                    */
-                    break;
-                case "chat":
-                case "connect":
-                HandleChatEvent(key, nickname, isSubscriber, isModerator, isFollowing, data);
-                    break;
-
-                case "like":
-                    ProcessLikeEvent(data, nickname);
-                    break;
-
-                case "gift":
-                    int giftCount = 1;
-                    int giftPrice = 1;
-
-                    if (data.TryGetProperty("repeatCount", out var rc) && rc.ValueKind == JsonValueKind.Number)
-                        giftCount = rc.GetInt32();
-
-                    if (data.TryGetProperty("gift", out var giftElem)
-                        && giftElem.ValueKind == JsonValueKind.Object
-                        && giftElem.TryGetProperty("diamondCount", out var dc)
-                        && dc.ValueKind == JsonValueKind.Number)
-                    {
-                        giftPrice = dc.GetInt32();
-                    }
-
-                    AddGiftDatabase(key, nickname, giftCount);
-                    GiftEnemySpawner.SpawnGiftEnemy(nickname, giftCount, giftPrice);
-                    break;
-
-                case "follow":
-                    HandleSubscribeEvent(key, nickname, isModerator, isFollowing);
-                    break;
-
-                case "share":
-                case "subscribe":
-                    HandleShareEvent(key, nickname, isModerator, isFollowing);
-                    break;
-
-                default:
-                    // Если неизвестное событие, всё равно обновляем базу, но SourceEvent = eventType или "Unknown"
-                    HandleJoinEvent(key, nickname);
-                    AddOrUpdateViewer(key, nickname, isSubscriber, isModerator, isFollowing, eventType ?? "Unknown");
-                    break;
-            }
+            doc = JsonDocument.Parse(json);
         }
         catch (JsonException)
         {
-            // Тихий fail
+            // Битый JSON — просто игнорируем
+            return;
         }
-        catch (Exception)
+        catch
         {
-            // Тихий fail
+            return;
+        }
+
+        using (doc)
+        {
+            try
+            {
+                var root = doc.RootElement;
+
+                // ----- event / data -----
+                string eventType =
+                    root.TryGetProperty("event", out var ev) && ev.ValueKind == JsonValueKind.String
+                        ? ev.GetString() ?? ""
+                        : "";
+
+                JsonElement data =
+                    root.TryGetProperty("data", out var d) && d.ValueKind == JsonValueKind.Object
+                        ? d
+                        : root;
+
+                // ----- streamer name (один раз) -----
+                if (eventType == "roomUser" && !_hasShownStreamerName)
+                {
+                    if (root.TryGetProperty("tikfinityUsername", out var sn) &&
+                        sn.ValueKind == JsonValueKind.String &&
+                        !string.IsNullOrWhiteSpace(sn.GetString()))
+                    {
+                        SetStreamer(sn.GetString().Trim());
+                    }
+                    else if (data.ValueKind == JsonValueKind.Object &&
+                             data.TryGetProperty("tikfinityUsername", out var sn2) &&
+                             sn2.ValueKind == JsonValueKind.String &&
+                             !string.IsNullOrWhiteSpace(sn2.GetString()))
+                    {
+                        SetStreamer(sn2.GetString().Trim());
+                    }
+                }
+
+                // ----- viewer info -----
+                string key = ExtractViewerKey(data);
+                if (string.IsNullOrWhiteSpace(key))
+                    return;
+
+                string nickname = ExtractNickname(data);
+
+                ExtractUserFlags(
+                    root,
+                    out bool isSubscriber,
+                    out bool isModerator,
+                    out bool isFollowing
+                );
+                /*
+                ModContent.GetInstance<ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>()
+                    .Logger.Debug($"[Tikfinity RAW] {json}");
+                */
+                // ===== EVENT HANDLING =====
+                switch (eventType)
+                {
+                    case "":
+                    case "join":
+                    case "roomUser":
+                    case "member":
+                        HandleJoinEvent(key, nickname);
+                        AddOrUpdateViewer(
+                            key,
+                            nickname,
+                            isSubscriber,
+                            isModerator,
+                            isFollowing,
+                            string.IsNullOrEmpty(eventType) ? "Unknown" : eventType
+                        );
+                        break;
+
+                    case "chat":
+                    case "connect":
+                        HandleChatEvent(
+                            key,
+                            nickname,
+                            isSubscriber,
+                            isModerator,
+                            isFollowing,
+                            data
+                        );
+                        break;
+
+                    case "like":
+                        ProcessLikeEvent(data, nickname);
+                        break;
+
+                    case "gift":
+                        {
+                            int giftCount = 1;
+                            int giftPrice = 1;
+
+                            if (data.TryGetProperty("repeatCount", out var rc) &&
+                                rc.ValueKind == JsonValueKind.Number &&
+                                rc.TryGetInt32(out int rcInt))
+                            {
+                                giftCount = Math.Max(1, rcInt);
+                            }
+
+                            if (data.TryGetProperty("gift", out var giftElem) &&
+                                giftElem.ValueKind == JsonValueKind.Object &&
+                                giftElem.TryGetProperty("diamondCount", out var dc) &&
+                                dc.ValueKind == JsonValueKind.Number &&
+                                dc.TryGetInt32(out int dcInt))
+                            {
+                                giftPrice = Math.Max(1, dcInt);
+                            }
+
+                            AddGiftDatabase(key, nickname, giftCount);
+                            GiftEnemySpawner.SpawnGiftEnemy(nickname, giftCount, giftPrice);
+                            break;
+                        }
+
+                    case "follow":
+                        HandleSubscribeEvent(key, nickname, isModerator, isFollowing);
+                        break;
+
+                    case "share":
+                    case "subscribe":
+                        HandleShareEvent(key, nickname, isModerator, isFollowing);
+                        break;
+
+                    default:
+                        HandleJoinEvent(key, nickname);
+                        AddOrUpdateViewer(
+                            key,
+                            nickname,
+                            isSubscriber,
+                            isModerator,
+                            isFollowing,
+                            eventType
+                        );
+                        break;
+                }
+            }
+            catch
+            {
+                // Любая логическая ошибка внутри — молча игнорируем
+                // WS-поток НИКОГДА не должен падать
+            }
         }
     }
 
@@ -885,8 +942,18 @@ public class TikFinityClient : ModSystem
             }
         }
 
-        if (!string.IsNullOrEmpty(nickname) && nickname.Length > 20)
-            nickname = nickname.Substring(0, 27) + "...";
+        // ====== БЕЗОПАСНОЕ ОБРЕЗАНИЕ С ЭМОДЗИ ======
+        if (!string.IsNullOrEmpty(nickname))
+        {
+            int maxLength = 27;
+
+            // Используем StringInfo для правильного подсчёта графем (учитывает эмодзи)
+            var stringInfo = new StringInfo(nickname);
+            if (stringInfo.LengthInTextElements > maxLength)
+            {
+                nickname = stringInfo.SubstringByTextElements(0, maxLength) + "...";
+            }
+        }
 
         return nickname;
     }
@@ -894,29 +961,48 @@ public class TikFinityClient : ModSystem
     // Возвращает стабильный ключ: сначала uniqueId (если есть), иначе nickname
     private string ExtractViewerKey(JsonElement root)
     {
-        // Ищем uniqueId в корне, в data, в user
-        if (root.TryGetProperty("uniqueId", out var idProp) && !string.IsNullOrWhiteSpace(idProp.GetString()))
-            return idProp.GetString().Trim();
+        // Ищем uniqueId в корне
+        if (root.TryGetProperty("uniqueId", out var idProp))
+        {
+            string id = idProp.GetString();
+            if (!string.IsNullOrWhiteSpace(id))
+                return id.Trim();
+        }
 
+        // Ищем uniqueId в data
         if (root.TryGetProperty("data", out var dataProp) && dataProp.ValueKind == JsonValueKind.Object)
         {
-            if (dataProp.TryGetProperty("uniqueId", out var dataIdProp) && !string.IsNullOrWhiteSpace(dataIdProp.GetString()))
-                return dataIdProp.GetString().Trim();
+            if (dataProp.TryGetProperty("uniqueId", out var dataIdProp))
+            {
+                string id = dataIdProp.GetString();
+                if (!string.IsNullOrWhiteSpace(id))
+                    return id.Trim();
+            }
 
+            // Проверяем data.user.uniqueId
             if (dataProp.TryGetProperty("user", out var userProp) && userProp.ValueKind == JsonValueKind.Object)
             {
-                if (userProp.TryGetProperty("uniqueId", out var userIdProp) && !string.IsNullOrWhiteSpace(userIdProp.GetString()))
-                    return userIdProp.GetString().Trim();
+                if (userProp.TryGetProperty("uniqueId", out var userIdProp))
+                {
+                    string id = userIdProp.GetString();
+                    if (!string.IsNullOrWhiteSpace(id))
+                        return id.Trim();
+                }
             }
         }
 
+        // Ищем root.user.uniqueId
         if (root.TryGetProperty("user", out var userElement) && userElement.ValueKind == JsonValueKind.Object)
         {
-            if (userElement.TryGetProperty("uniqueId", out var userIdProp) && !string.IsNullOrWhiteSpace(userIdProp.GetString()))
-                return userIdProp.GetString().Trim();
+            if (userElement.TryGetProperty("uniqueId", out var userIdProp))
+            {
+                string id = userIdProp.GetString();
+                if (!string.IsNullOrWhiteSpace(id))
+                    return id.Trim();
+            }
         }
 
-        // Фолбэк — используем nickname (не идеально, но лучше чем ничего)
+        // Фолбэк — используем безопасно ExtractNickname
         string nick = ExtractNickname(root);
         return string.IsNullOrEmpty(nick) ? null : nick;
     }
@@ -1038,7 +1124,6 @@ public class TikFinityClient : ModSystem
             UpdateSubscriberDatabaseJson(entry);
             RebuildSubscriberCache();
         }
-
         if (isModerator)
         {
             AddOrUpdateModerator(key, nickname, "ChatMessage", ExtractCommentText(data));
@@ -1068,7 +1153,6 @@ public class TikFinityClient : ModSystem
     {
         if (string.IsNullOrEmpty(nickname))
             return;
-
         // 🦋 бабочка всегда
         SpawnViewerButterfly(nickname, key);
 
@@ -1078,20 +1162,17 @@ public class TikFinityClient : ModSystem
             SpawnVeteranSlime(nickname);
             veteranSpawnedThisSession.Add(key);
         }
-
         // 🔥 если пользователь — модератор — спавним огненного слизня
         if (ModDataStorage.ModeratorDatabase.ContainsKey(key))
         {
             SpawnModeratorSlime(nickname);
         }
-
         // 🔥 если пользователь есть в базе дарителей — спавним золотого слизня
         if (GiftGiverIds.Contains(key))
         {
             // SpawnGifterDragonfly(nickname, key);
             SpawnGifterSlime(nickname);
         }
-
     }
 
     // -------------------------
@@ -1130,10 +1211,8 @@ public class TikFinityClient : ModSystem
             else if (dataProp.TryGetProperty("content", out var contentProp) && !string.IsNullOrWhiteSpace(contentProp.GetString()))
                 text = contentProp.GetString().Trim();
         }
-
         //if (text.Length > 50)
         //text = text.Substring(0, 47) + "...";
-
         return text;
     }
 
@@ -1144,7 +1223,6 @@ public class TikFinityClient : ModSystem
     {
         if (string.IsNullOrEmpty(input))
             return input;
-
         return input
             .Replace("😀", ":)")
             .Replace("😂", "xD")
@@ -1160,7 +1238,6 @@ public class TikFinityClient : ModSystem
 
         string cleanName = NickSanitizer.Sanitize(nickname);
 
-        // 🔥 комбо
         if (likeComboCounter.ContainsKey(viewerKey))
             likeComboCounter[viewerKey] += likeIncrement;
         else
@@ -1170,21 +1247,50 @@ public class TikFinityClient : ModSystem
 
         Main.QueueMainThreadAction(() =>
         {
-            var player = Main.LocalPlayer;
+            // 🔒 ЖЁСТКИЙ ГЕЙТ
+            if (!worldLoaded || Main.gameMenu)
+                return;
 
-            NPC existing = Main.npc.FirstOrDefault(n =>
-                n.active &&
-                n.type == NPCID.GreenDragonfly &&
-                n.TryGetGlobalNPC(out LikeFloatingTextGlobal g) &&
-                g.viewerKey == viewerKey
-            );
+            var player = Main.LocalPlayer;
+            if (player == null || !player.active || player.dead)
+                return;
+
+            NPC existing = null;
+
+            // ❗ ТОЛЬКО ТАК, БЕЗ LINQ
+            for (int i = 0; i < Main.maxNPCs; i++)
+            {
+                NPC n = Main.npc[i];
+
+                if (n == null || !n.active)
+                    continue;
+
+                if (n.type != NPCID.GreenDragonfly)
+                    continue;
+
+                if (n.whoAmI < 0 || n.whoAmI >= Main.maxNPCs)
+                    continue;
+
+                if (!n.TryGetGlobalNPC<LikeFloatingTextGlobal>(out var g))
+                    continue;
+
+                if (g.viewerKey != viewerKey)
+                    continue;
+
+                existing = n;
+                break;
+            }
 
             if (existing != null)
             {
-                var g = existing.GetGlobalNPC<LikeFloatingTextGlobal>();
-                g.likeCount = totalLikes;
-                g.TriggerCombo(player.Center + new Vector2(0, -50));
-                existing.netUpdate = true;
+                if (existing.whoAmI >= 0 &&
+                    existing.whoAmI < Main.maxNPCs &&
+                    existing.TryGetGlobalNPC<LikeFloatingTextGlobal>(out var g))
+                {
+                    g.likeCount = totalLikes;
+                    g.TriggerCombo(player.Center + new Vector2(0, -50));
+                    existing.netUpdate = true;
+                }
                 return;
             }
 
@@ -1198,25 +1304,33 @@ public class TikFinityClient : ModSystem
                 NPCID.GreenDragonfly
             );
 
-            if (npcID >= 0)
-            {
-                NPC npc = Main.npc[npcID];
-                npc.friendly = true;
-                npc.dontTakeDamage = true;
-                npc.noGravity = true;
-                npc.noTileCollide = true;
-                npc.life = 1;
-                npc.lifeMax = 1;
-                npc.timeLeft = LikeFloatingTextGlobal.MaxLife;
+            if (npcID < 0 || npcID >= Main.maxNPCs)
+                return;
 
-                var g = npc.GetGlobalNPC<LikeFloatingTextGlobal>();
-                g.viewerKey = viewerKey;
-                g.viewerName = cleanName;
-                g.likeCount = totalLikes;
-                g.life = 0;
-                g.TriggerCombo(player.Center + new Vector2(0, -50));
-                npc.netUpdate = true;
+            NPC npc = Main.npc[npcID];
+            if (!npc.active)
+                return;
+
+            npc.friendly = true;
+            npc.dontTakeDamage = true;
+            npc.noGravity = true;
+            npc.noTileCollide = true;
+            npc.life = 1;
+            npc.lifeMax = 1;
+            npc.timeLeft = LikeFloatingTextGlobal.MaxLife;
+
+            if (npc.whoAmI >= 0 &&
+                npc.whoAmI < Main.maxNPCs &&
+                npc.TryGetGlobalNPC<LikeFloatingTextGlobal>(out var newG))
+            {
+                newG.likeCount = totalLikes;
+                newG.viewerKey = viewerKey;
+                newG.viewerName = cleanName;
+                newG.life = 0;
+                newG.TriggerCombo(player.Center + new Vector2(0, -50));
             }
+
+            npc.netUpdate = true;
         });
     }
 
@@ -1228,9 +1342,7 @@ public class TikFinityClient : ModSystem
         {
             likeIncrement = countProp.GetInt32();
         }
-
         string viewerKey = ExtractViewerKey(root);
-
         HandleLike(viewerKey, nickname, likeIncrement);
     }
 
@@ -1246,29 +1358,42 @@ public class TikFinityClient : ModSystem
         if (string.IsNullOrWhiteSpace(cleanName)) cleanName = viewerId;
 
         // Не дублируем
-        if (Main.npc.Any(n =>
-            n.active && n.type == NPCID.Butterfly &&
-            n.TryGetGlobalNPC(out ViewerButterflyGlobal g) &&
-            g.isViewerButterfly && g.rawId == viewerId))
-            return;
-
         Main.QueueMainThreadAction(() =>
         {
+            if (!worldLoaded || Main.gameMenu)
+                return;
+
+            if (Main.npc.Any(n =>
+                n.active && n.type == NPCID.Butterfly &&
+                n.whoAmI >= 0 && n.whoAmI < Main.maxNPCs && // ✅ проверка диапазона
+                n.TryGetGlobalNPC(out ViewerButterflyGlobal g) &&
+                g.isViewerButterfly && g.rawId == viewerId))
+                return;
+
             var player = Main.LocalPlayer;
+            if (player == null || !player.active)
+                return; // проверка игрока
+
             int npcID = NPC.NewNPC(
                 player.GetSource_FromThis(),
                 (int)player.position.X + Main.rand.Next(-200, 200),
                 (int)player.position.Y - 100,
                 NPCID.Butterfly
             );
-            if (npcID >= 0)
+
+            if (npcID >= 0 && npcID < Main.maxNPCs) // ✅ проверка диапазона
             {
                 NPC npc = Main.npc[npcID];
-                var g = npc.GetGlobalNPC<ViewerButterflyGlobal>();
-                g.isViewerButterfly = true;
-                g.viewerName = cleanName;
-                g.rawId = viewerId;
-                g.lifetime = 0;
+                if (!npc.active) return;
+
+                if (npc.whoAmI >= 0 && npc.whoAmI < Main.maxNPCs && // ✅ ещё раз перед TryGetGlobalNPC
+                    npc.TryGetGlobalNPC<ViewerButterflyGlobal>(out var g))
+                {
+                    g.isViewerButterfly = true;
+                    g.viewerName = cleanName;
+                    g.rawId = viewerId;
+                    g.lifetime = 0;
+                }
             }
         });
     }
@@ -1277,14 +1402,26 @@ public class TikFinityClient : ModSystem
     {
         if (Main.netMode == NetmodeID.MultiplayerClient) return;
         if (CountActiveFireflies() >= 15) return; // ⚠️ лимит
-                                                    // Не спавним, если уже есть активная Firefly от этого зрителя
-        if (Main.npc.Any(n => n.active && n.type == NPCID.Firefly &&
-            n.TryGetGlobalNPC(out ViewerFireflyGlobal g) && g.viewerName == NickSanitizer.Sanitize(nickname)))
-            return;
 
         Main.QueueMainThreadAction(() =>
         {
+            if (!worldLoaded || Main.gameMenu)
+                return;
+
+            string cleanName = NickSanitizer.Sanitize(nickname);
+
+            // 🔒 БЕЗОПАСНАЯ проверка на дубликат
+            if (Main.npc.Any(n =>
+                n.active &&
+                n.type == NPCID.Firefly &&
+                n.whoAmI >= 0 && n.whoAmI < Main.maxNPCs &&
+                n.TryGetGlobalNPC(out ViewerFireflyGlobal g) &&
+                g.viewerName == cleanName))
+                return;
+
             var player = Main.LocalPlayer;
+            if (player == null || !player.active || player.dead)
+                return;
 
             int npcID = NPC.NewNPC(
                 player.GetSource_FromThis(),
@@ -1293,18 +1430,27 @@ public class TikFinityClient : ModSystem
                 NPCID.Firefly
             );
 
-            if (npcID >= 0)
+            // 🔒 ПРОВЕРКА ИНДЕКСА
+            if (npcID < 0 || npcID >= Main.maxNPCs)
+                return;
+
+            NPC npc = Main.npc[npcID];
+            if (!npc.active)
+                return;
+
+            // 🔒 TryGetGlobalNPC только после проверок
+            if (npc.whoAmI >= 0 && npc.whoAmI < Main.maxNPCs &&
+                npc.TryGetGlobalNPC<ViewerFireflyGlobal>(out var g))
             {
-                NPC npc = Main.npc[npcID];
-                var global = npc.GetGlobalNPC<ViewerFireflyGlobal>();
                 comment = ReplaceEmojis(comment);
 
-                global.viewerName = NickSanitizer.Sanitize(nickname);
-                global.commentText = comment;
-                global.isComment = true;
-                global.isViewer = true;
+                g.viewerName = cleanName;
+                g.commentText = comment;
+                g.isComment = true;
+                g.isViewer = true;
 
                 npc.timeLeft = 300;
+                npc.netUpdate = true;
             }
 
             string chatMessage = $"[Чат] {nickname}: {comment}";
@@ -1325,7 +1471,12 @@ public class TikFinityClient : ModSystem
 
         Main.QueueMainThreadAction(() =>
         {
+            if (!worldLoaded || Main.gameMenu)
+                return;
+
             var player = Main.LocalPlayer;
+            if (player == null || !player.active || player.dead)
+                return;
 
             int npcID = NPC.NewNPC(
                 player.GetSource_FromThis(),
@@ -1334,27 +1485,42 @@ public class TikFinityClient : ModSystem
                 NPCID.BlueSlime
             );
 
-            if (npcID >= 0)
+            // 🔒 ОБЯЗАТЕЛЬНАЯ проверка индекса
+            if (npcID < 0 || npcID >= Main.maxNPCs)
+                return;
+
+            NPC npc = Main.npc[npcID];
+            if (!npc.active)
+                return;
+
+            // === базовые параметры ===
+            npc.friendly = true;
+            npc.damage = 20;
+            npc.lifeMax = 250;
+            npc.life = 250;
+            npc.defense = 15;
+            npc.knockBackResist = 0.5f;
+            npc.chaseable = true;
+            npc.target = player.whoAmI;
+
+            // ⏳ не используем int.MaxValue — это безопаснее
+            npc.timeLeft = 60 * 60 * 5; // 5 минут
+
+            // 🔒 GlobalNPC — только после проверок
+            if (npc.whoAmI >= 0 && npc.whoAmI < Main.maxNPCs &&
+                npc.TryGetGlobalNPC<ViewerSlimesGlobal>(out var g))
             {
-                NPC npc = Main.npc[npcID];
-
-                npc.friendly = true;
-                npc.damage = 20;
-                npc.lifeMax = 250;
-                npc.life = 250;
-                npc.defense = 15;
-                npc.knockBackResist = 0.5f;
-                npc.chaseable = true;
-                npc.target = player.whoAmI;
-                npc.timeLeft = int.MaxValue; // чтобы Terraria не убила NPC раньше
-                var global = npc.GetGlobalNPC<ViewerSlimesGlobal>();
-                global.viewerName = NickSanitizer.Sanitize(nickname);
-                global.isViewer = true;
-                var lifetime = npc.GetGlobalNPC<VisualLifetimeGlobalNPC>();
-                lifetime.SetLifetime(60); // 60 сек
-                npc.netUpdate = true;
-
+                g.viewerName = NickSanitizer.Sanitize(nickname);
+                g.isViewer = true;
             }
+
+            if (npc.whoAmI >= 0 && npc.whoAmI < Main.maxNPCs &&
+                npc.TryGetGlobalNPC<VisualLifetimeGlobalNPC>(out var lifetime))
+            {
+                lifetime.SetLifetime(60);
+            }
+
+            npc.netUpdate = true;
 
             Main.NewText($"[Новый подписчик] {nickname}!", 255, 10, 100);
         });
@@ -1363,11 +1529,16 @@ public class TikFinityClient : ModSystem
     private static void SpawnVeteranSlime(string nickname)
     {
         if (Main.netMode == NetmodeID.MultiplayerClient) return;
-        if (CountActiveSlimes() >= 10) return; // ⚠️ общий лимит на всех слизней
+        if (CountActiveSlimes() >= 10) return;
 
         Main.QueueMainThreadAction(() =>
         {
+            if (!worldLoaded || Main.gameMenu)
+                return;
+
             var player = Main.LocalPlayer;
+            if (player == null || !player.active || player.dead)
+                return;
 
             int npcID = NPC.NewNPC(
                 player.GetSource_FromThis(),
@@ -1376,26 +1547,37 @@ public class TikFinityClient : ModSystem
                 NPCID.RedSlime
             );
 
-            if (npcID >= 0)
+            if (npcID < 0 || npcID >= Main.maxNPCs)
+                return;
+
+            NPC npc = Main.npc[npcID];
+            if (!npc.active)
+                return;
+
+            npc.friendly = true;
+            npc.damage = 20;
+            npc.lifeMax = 500;
+            npc.life = 500;
+            npc.defense = 40;
+            npc.knockBackResist = 0.3f;
+
+            npc.timeLeft = 60 * 60 * 5; // 5 минут
+
+            if (npc.whoAmI >= 0 && npc.whoAmI < Main.maxNPCs &&
+                npc.TryGetGlobalNPC<ViewerSlimesGlobal>(out var g))
             {
-                NPC npc = Main.npc[npcID];
-                npc.friendly = true;
-                npc.damage = 20;
-                npc.lifeMax = 500;
-                npc.life = 500;
-                npc.defense = 40;
-                npc.knockBackResist = 0.3f;
-                //npc.chaseable = true;
-                //npc.target = player.whoAmI;
-                npc.timeLeft = int.MaxValue; // чтобы Terraria не убила NPC раньше
-                var global = npc.GetGlobalNPC<ViewerSlimesGlobal>();
-                global.viewerName = NickSanitizer.Sanitize(nickname);
-                global.isViewer = true;
-                global.isVeteran = true;
-                var lifetime = npc.GetGlobalNPC<VisualLifetimeGlobalNPC>();
-                lifetime.SetLifetime(150);
-                npc.netUpdate = true;
+                g.viewerName = NickSanitizer.Sanitize(nickname);
+                g.isViewer = true;
+                g.isVeteran = true;
             }
+
+            if (npc.whoAmI >= 0 && npc.whoAmI < Main.maxNPCs &&
+                npc.TryGetGlobalNPC<VisualLifetimeGlobalNPC>(out var lifetime))
+            {
+                lifetime.SetLifetime(150);
+            }
+
+            npc.netUpdate = true;
 
             Main.NewText($"[Подписчик] {nickname} прибыл!", 255, 215, 0);
         });
@@ -1404,35 +1586,55 @@ public class TikFinityClient : ModSystem
     private static void SpawnModeratorSlime(string nickname)
     {
         if (Main.netMode == NetmodeID.MultiplayerClient) return;
+
         Main.QueueMainThreadAction(() =>
         {
+            if (!worldLoaded || Main.gameMenu)
+                return;
+
             var player = Main.LocalPlayer;
+            if (player == null || !player.active || player.dead)
+                return;
+
             int npcID = NPC.NewNPC(
                 player.GetSource_FromThis(),
                 (int)player.position.X + Main.rand.Next(-200, 200),
                 (int)player.position.Y,
                 NPCID.LavaSlime
             );
-            if (npcID >= 0)
+
+            if (npcID < 0 || npcID >= Main.maxNPCs)
+                return;
+
+            NPC npc = Main.npc[npcID];
+            if (!npc.active)
+                return;
+
+            npc.friendly = true;
+            npc.damage = 25;
+            npc.lifeMax = 400;
+            npc.life = 400;
+            npc.defense = 40;
+            npc.knockBackResist = 0.5f;
+
+            npc.timeLeft = 60 * 60 * 5;
+
+            if (npc.whoAmI >= 0 && npc.whoAmI < Main.maxNPCs &&
+                npc.TryGetGlobalNPC<ViewerSlimesGlobal>(out var g))
             {
-                NPC npc = Main.npc[npcID];
-                npc.friendly = true;
-                npc.damage = 25;
-                npc.lifeMax = 400;
-                npc.life = 400;
-                npc.defense = 40;
-                npc.knockBackResist = 0.5f;
-                //npc.chaseable = true;
-                //npc.target = player.whoAmI;
-                npc.timeLeft = int.MaxValue; // ← важно: отключаем стандартный таймер Terraria
-                var global = npc.GetGlobalNPC<ViewerSlimesGlobal>();
-                global.viewerName = NickSanitizer.Sanitize(nickname);
-                global.isViewer = true;
-                global.isModerator = true;
-                var lifetime = npc.GetGlobalNPC<VisualLifetimeGlobalNPC>();
-                lifetime.SetLifetime(300);
-                npc.netUpdate = true;
+                g.viewerName = NickSanitizer.Sanitize(nickname);
+                g.isViewer = true;
+                g.isModerator = true;
             }
+
+            if (npc.whoAmI >= 0 && npc.whoAmI < Main.maxNPCs &&
+                npc.TryGetGlobalNPC<VisualLifetimeGlobalNPC>(out var lifetime))
+            {
+                lifetime.SetLifetime(300);
+            }
+
+            npc.netUpdate = true;
+
             Main.NewText($"[Модератор] {nickname} прибыл!", 255, 80, 20);
         });
     }
@@ -1440,11 +1642,16 @@ public class TikFinityClient : ModSystem
     private static void SpawnGifterSlime(string nickname)
     {
         if (Main.netMode == NetmodeID.MultiplayerClient) return;
-        if (CountActiveSlimes() >= 10) return; // ⚠️ общий лимит на всех слизней
+        if (CountActiveSlimes() >= 10) return;
 
         Main.QueueMainThreadAction(() =>
         {
+            if (!worldLoaded || Main.gameMenu)
+                return;
+
             var player = Main.LocalPlayer;
+            if (player == null || !player.active || player.dead)
+                return;
 
             int npcID = NPC.NewNPC(
                 player.GetSource_FromThis(),
@@ -1453,26 +1660,37 @@ public class TikFinityClient : ModSystem
                 NPCID.GoldenSlime
             );
 
-            if (npcID >= 0)
+            if (npcID < 0 || npcID >= Main.maxNPCs)
+                return;
+
+            NPC npc = Main.npc[npcID];
+            if (!npc.active)
+                return;
+
+            npc.friendly = true;
+            npc.damage = 20;
+            npc.lifeMax = 500;
+            npc.life = 500;
+            npc.defense = 40;
+            npc.knockBackResist = 0.3f;
+
+            npc.timeLeft = 60 * 60 * 5;
+
+            if (npc.whoAmI >= 0 && npc.whoAmI < Main.maxNPCs &&
+                npc.TryGetGlobalNPC<ViewerSlimesGlobal>(out var g))
             {
-                NPC npc = Main.npc[npcID];
-                npc.friendly = true;
-                npc.damage = 20;       // можно чуть больше или меньше по желанию
-                npc.lifeMax = 500;
-                npc.life = 500;
-                npc.defense = 40;
-                npc.knockBackResist = 0.3f;
-                //npc.chaseable = true;
-                //npc.target = player.whoAmI;
-                npc.timeLeft = int.MaxValue; // чтобы Terraria не убила NPC раньше
-                var global = npc.GetGlobalNPC<ViewerSlimesGlobal>();
-                global.viewerName = NickSanitizer.Sanitize(nickname);
-                global.isViewer = true;
-                global.isGifter = true;
-                var lifetime = npc.GetGlobalNPC<VisualLifetimeGlobalNPC>();
-                lifetime.SetLifetime(300);
-                npc.netUpdate = true;
+                g.viewerName = NickSanitizer.Sanitize(nickname);
+                g.isViewer = true;
+                g.isGifter = true;
             }
+
+            if (npc.whoAmI >= 0 && npc.whoAmI < Main.maxNPCs &&
+                npc.TryGetGlobalNPC<VisualLifetimeGlobalNPC>(out var lifetime))
+            {
+                lifetime.SetLifetime(300);
+            }
+
+            npc.netUpdate = true;
 
             Main.NewText($"[Даритель] {nickname} прибыл!", 255, 215, 0);
         });
@@ -1481,35 +1699,55 @@ public class TikFinityClient : ModSystem
     private static void SpawnShareSlime(string nickname)
     {
         if (Main.netMode == NetmodeID.MultiplayerClient) return;
+
         Main.QueueMainThreadAction(() =>
         {
+            if (!worldLoaded || Main.gameMenu)
+                return;
+
             var player = Main.LocalPlayer;
+            if (player == null || !player.active || player.dead)
+                return;
+
             int npcID = NPC.NewNPC(
                 player.GetSource_FromThis(),
                 (int)player.Center.X + Main.rand.Next(-200, 200),
                 (int)player.Center.Y - 100,
                 NPCID.RainbowSlime
             );
-            if (npcID >= 0)
+
+            if (npcID < 0 || npcID >= Main.maxNPCs)
+                return;
+
+            NPC npc = Main.npc[npcID];
+            if (!npc.active)
+                return;
+
+            npc.friendly = true;
+            npc.damage = 10;
+            npc.lifeMax = 150;
+            npc.life = 150;
+            npc.defense = 20;
+            npc.knockBackResist = 0.5f;
+
+            npc.timeLeft = 60 * 60 * 3;
+
+            if (npc.whoAmI >= 0 && npc.whoAmI < Main.maxNPCs &&
+                npc.TryGetGlobalNPC<ViewerSlimesGlobal>(out var g))
             {
-                NPC npc = Main.npc[npcID];
-                npc.friendly = true;
-                npc.damage = 10;
-                npc.lifeMax = 150;
-                npc.life = 150;
-                npc.defense = 20;
-                npc.knockBackResist = 0.5f;
-                //npc.chaseable = true;
-                //npc.target = player.whoAmI;
-                npc.timeLeft = int.MaxValue; // важно!
-                var global = npc.GetGlobalNPC<ViewerSlimesGlobal>();
-                global.isViewer = true;
-                global.isRainbow = true;
-                global.viewerName = NickSanitizer.Sanitize(nickname);
-                var lifetime = npc.GetGlobalNPC<VisualLifetimeGlobalNPC>();
-                lifetime.SetLifetime(15);
-                npc.netUpdate = true;
+                g.isViewer = true;
+                g.isRainbow = true;
+                g.viewerName = NickSanitizer.Sanitize(nickname);
             }
+
+            if (npc.whoAmI >= 0 && npc.whoAmI < Main.maxNPCs &&
+                npc.TryGetGlobalNPC<VisualLifetimeGlobalNPC>(out var lifetime))
+            {
+                lifetime.SetLifetime(15);
+            }
+
+            npc.netUpdate = true;
+
             Main.NewText($"[Share] {nickname} поделился стримом!", new Color(255, 182, 193));
         });
     }
@@ -1540,7 +1778,6 @@ public class TikFinityClient : ModSystem
             isModerator = false,
             isFollowing = false
         };
-
         HandleShareEvent(fakeShare.UserId, fakeShare.UserName, fakeShare.isModerator, fakeShare.isFollowing);
         Main.NewText($"[TEST] Share от {fakeShare.UserName}", Color.LightBlue);
     }
@@ -1554,7 +1791,6 @@ public class TikFinityClient : ModSystem
             isModerator = false,
             isFollowing = false
         };
-
         HandleSubscribeEvent(fakeSubscribe.UserId, fakeSubscribe.UserName, fakeSubscribe.isModerator, fakeSubscribe.isFollowing);
         Main.NewText($"[TEST] Subscribe: {fakeSubscribe.UserName}", Color.Gold);
     }

@@ -40,12 +40,18 @@ public class VisualLifetimeGlobalNPC : GlobalNPC
         if (currentLifetime <= FadeDuration)
         {
             float progress = 1f - (currentLifetime / (float)FadeDuration);
-            npc.alpha = (int)(progress * 255f);
+            npc.alpha = (int)MathHelper.Clamp(progress * 255f, 0, 255);
         }
 
         // превращение в стрекозу
-        if (lifetime == 0 && !transformedToVisual)
+        if (lifetime <= 0 && !transformedToVisual)
         {
+            if (!npc.active)
+                return;
+
+            if (npc.whoAmI < 0 || npc.whoAmI >= Main.maxNPCs)
+                return;
+
             transformedToVisual = true;
 
             // сохраняем ник до превращения
@@ -55,6 +61,8 @@ public class VisualLifetimeGlobalNPC : GlobalNPC
 
             // 🔥 превращаем в стрекозу
             npc.Transform(NPCID.GreenDragonfly);
+            if (!npc.active)
+                return;
 
             // делаем стрекозу "призраком"
             npc.friendly = true;
@@ -76,7 +84,10 @@ public class VisualLifetimeGlobalNPC : GlobalNPC
         }
 
         if (lifetime < -10)
+        {
             npc.active = false;
+            npc.netUpdate = true;
+        }
     }
 }
 
@@ -114,6 +125,9 @@ public class ViewerSlimesGlobal : GlobalNPC
 
     public override void AI(NPC npc)
     {
+        if (!npc.active)
+            return;
+
         if (!IsSlime(npc) || !isViewer)
             return;
 
@@ -215,7 +229,7 @@ public class ViewerSlimesGlobal : GlobalNPC
         if (jumpCooldown > 0)
             jumpCooldown--;
 
-        bool onGround = npc.velocity.Y == 0f && npc.collideY; // на земле
+        bool onGround = npc.velocity.Y == 0f;
         if (onGround && jumpCooldown == 0)
         {
             // Прыжок при препятствии или когда нужно догнать игрока/врага
@@ -247,7 +261,7 @@ public class ViewerSlimesGlobal : GlobalNPC
                 },
                 noPlayerInteraction: true
             );
-
+            npc.netUpdate = true;
             attackCooldown = AttackDelay;
         }
     }
@@ -307,7 +321,10 @@ public class ViewerButterflyGlobal : GlobalNPC
             npc.alpha = (int)MathHelper.Clamp((lifetime - 540) * 4.25f, 0, 255);
 
         if (lifetime > 600)
+        {
             npc.active = false;
+            npc.netUpdate = true;
+        }
     }
 
     public override void PostDraw(NPC npc, SpriteBatch spriteBatch, Vector2 screenPos, Color drawColor)
@@ -416,7 +433,10 @@ public class ViewerFireflyGlobal : GlobalNPC
         npc.alpha = (int)(255 * progress);
 
         if (fadeTicks >= FadeTime)
+        {
             npc.active = false;
+            npc.netUpdate = true;
+        }
     }
 
     public override void PostDraw(NPC npc, SpriteBatch spriteBatch, Vector2 screenPos, Color drawColor)
@@ -534,6 +554,7 @@ public class LikeFloatingTextGlobal : GlobalNPC
         if (life >= MaxLife)
         {
             npc.active = false;
+            npc.netUpdate = true;
             return; // важно: выйти, чтобы не обновлять alpha/движение
         }
 
