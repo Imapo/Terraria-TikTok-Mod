@@ -1,5 +1,6 @@
 // server.js — TikTok + Twitch + YouTube → Terraria (FINAL)
 import fs from 'fs';
+import { Client, GatewayIntentBits } from 'discord.js';
 import TelegramBot from 'node-telegram-bot-api';
 import open from 'open';
 import WebSocket from 'ws';
@@ -95,24 +96,22 @@ const TELEGRAM_COMMAND_MAP = {
 };
 const VIP_FILE = './vip.json';
 const TELEGRAM_CHANNEL_ID = process.env.TELEGRAM_CHANNEL_ID;
-let streamAnnounced = {
-    twitch: false,
-    youtube: false,
-    tiktok: false
-};
 let tgBot;
 const OWNER_ID = Number(process.env.OWNER_ID);
 // ===== История чата =====
 const chatHistory = []; // последние 50 сообщений
 const CHAT_HISTORY_LIMIT = 50;
-const aggregatedGifts = new Map();
-let ytRetryTimer = null;
-let ytRetryDelay = 30_000; // 30 секунд
-let ytLastErrorMessage = null;
 let tiktokLive = false;       // отслеживаем состояние TikTok стрима
-let announceMessageId = null;  // хранит ID Telegram-сообщения с единым статусом
 let cachedUpload = { value: null, ts: 0 };
 let twitchLiveCache = { value: null, ts: 0 };
+let discordClient;
+let discordChannel;
+let discordChatChannel;
+let discordStatusChannel;
+let discordMessageId = null;
+let discordUpdateLock = false;
+let streamStartTs = null;
+let announceMessageId = null;
 
 
 // Статические файлы
@@ -125,6 +124,79 @@ app.listen(3000, () => {
 /* =======================
 WEBSOCKET → TERRARIA
 ======================= */
+
+async function sendToDiscordChat({
+  platform,
+  username,
+  text
+}) {
+  if (!discordChatChannel) return;
+
+  const icons = {
+    twitch: '🟣',
+    youtube: '🔴',
+    tiktok: '⚫',
+    telegram: '🔵'
+  };
+
+  const icon = icons[platform] ?? '💬';
+
+  const message = `${icon} **${username}** :\n${text}`;
+
+  await discordChatChannel.send({
+        content: message.slice(0, 1900)
+  });
+}
+
+function updateStreamStart(anyLive) {
+    if (anyLive && !streamStartTs) {
+        streamStartTs = Date.now();
+    }
+    if (!anyLive) {
+        streamStartTs = null;
+    }
+}
+
+function formatUptime() {
+    if (!streamStartTs) return '—';
+
+    const sec = Math.floor((Date.now() - streamStartTs) / 1000);
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = sec % 60;
+
+    if (h > 0) return `${h}ч ${m}м`;
+    if (m > 0) return `${m}м ${s}с`;
+    return `${s}с`;
+}
+
+function buildStreamStatusText({
+    twitchLive,
+    ytLive,
+    tiktokLive,
+    uploadMbps
+}) {
+    const platformLine = [
+        `Twitch ${twitchLive ? '🟢' : '🔴'}`,
+        `YouTube ${ytLive ? '🟢' : '🔴'}`,
+        `TikTok ${tiktokLive ? '🟢' : '🔴'}`
+    ].join(' | ');
+
+    const speedLine = uploadMbps
+        ? `${uploadIndicator(uploadMbps)} ${uploadMbps} Mbps`
+        : `⚪ n/a`;
+
+    const uptime = formatUptime();
+
+    return (
+        `Стрим идёт на:\n` +
+        `${platformLine} | ${speedLine}\n` +
+        `⏱ Аптайм: ${uptime}\n\n` +
+        `Чаты:\n` +
+        `💭 TG: https://t.me/+q9BrXnjmFCFmMmQy\n` +
+        `💭 DISCORD: https://discord.com/channels/735134140697018419/1464255245009031279`
+    );
+}
 
 async function isTwitchLiveCached() {
     if (Date.now() - twitchLiveCache.ts < 30_000) {
@@ -332,44 +404,68 @@ async function isTwitchLive() {
     return Array.isArray(json.data) && json.data.length > 0;
 }
 
+async function updateDiscordStatusMessage(text) {
+    if (!discordStatusChannel) return;
+    if (discordUpdateLock) return;
+
+    discordUpdateLock = true;
+
+    try {
+        if (discordMessageId) {
+            const msg = await discordStatusChannel.messages.fetch(discordMessageId);
+            await msg.edit(text);
+        } else {
+            const msg = await discordStatusChannel.send(text);
+            discordMessageId = msg.id;
+        }
+    } catch (e) {
+        console.error('Discord update error:', e.message);
+        discordMessageId = null;
+    } finally {
+        setTimeout(() => { discordUpdateLock = false; }, 500);
+    }
+}
+
 async function updateStreamStatusMessage() {
     try {
         const twitchLive = await isTwitchLiveCached();
         const anyLive = twitchLive || ytStarted || tiktokLive;
-        const uploadMbps = anyLive ? await getCachedUploadSpeed() : null;
-        const speedLine = uploadMbps
-        ? `${uploadIndicator(uploadMbps)} ${uploadMbps} Mbps`
-        : `⚪ n/a`;
 
-        const status = {
-            twitch: twitchLive ? '🟩' : '🟥',
-            youtube: ytStarted ? '🟩' : '🟥',
-            tiktok: tiktokLive ? '🟩' : '🟥'
-        };
+        updateStreamStart(anyLive);
 
-        const text = `Стрим начался 🗣️:\n\n` +
-        `📤 Скорость отдачи: ${speedLine}\n\n` +    
-        `🟣 Twitch ${status.twitch}\n` +
-        `🔴 YouTube ${status.youtube}\n` +
-        `⚫ TikTok ${status.tiktok}\n\n` +
-        `💬 Чат трансляции:\n👉 https://t.me/+q9BrXnjmFCFmMmQy`;
+        const rawSpeedMBps = await getCachedUploadSpeed();
+        const uploadMbps = rawSpeedMBps
+            ? +(rawSpeedMBps * 8).toFixed(1)
+            : null;
 
-        if (announceMessageId) {
-            // Редактируем существующее сообщение
-            await tgBot.editMessageText(text, {
-                chat_id: TELEGRAM_CHANNEL_ID,
-                message_id: announceMessageId
-            });
-        } else {
-            // Отправляем новое сообщение
-            const msg = await tgBot.sendMessage(TELEGRAM_CHANNEL_ID, text, {
-                disable_web_page_preview: true
-            });
-            console.log(`Запущенные стримы: ${text}`);
-            announceMessageId = msg.message_id;
+        const text = buildStreamStatusText({
+            twitchLive,
+            ytLive: ytStarted,
+            tiktokLive,
+            uploadMbps
+        });
+
+        // Discord
+        await updateDiscordStatusMessage(text);
+
+        // Telegram (если включишь обратно)
+        if (tgBot) {
+            if (announceMessageId) {
+                await tgBot.editMessageText(text, {
+                    chat_id: TELEGRAM_CHANNEL_ID,
+                    message_id: announceMessageId,
+                    disable_web_page_preview: true
+                });
+            } else {
+                const msg = await tgBot.sendMessage(TELEGRAM_CHANNEL_ID, text, {
+                    disable_web_page_preview: true
+                });
+                announceMessageId = msg.message_id;
+            }
         }
+
     } catch (e) {
-        console.error('Telegram announce error:', e.message);
+        console.error('Stream status update error:', e.message);
     }
 }
 
@@ -890,6 +986,13 @@ async function main() {
                 nickname: `[TG] ${user}`,
                 text
             });
+
+            if (!msg.text) return;
+            sendToDiscordChat({
+                platform: 'telegram',
+                username: `[TG] ${user}`,
+                text: text
+            });
         });
 
     } catch (err) {
@@ -1083,6 +1186,12 @@ async function main() {
             emit('chat', 'twitch', {
                 userId: tags['user-id'],
                 nickname: formatNickname('twitch', user),
+                text: msg
+            });
+            if (self) return;
+            sendToDiscordChat({
+                platform: 'twitch',
+                username: formatNickname('twitch', user),
                 text: msg
             });
         });
@@ -1280,6 +1389,11 @@ async function main() {
                     userId,
                     nickname: formatNickname('tiktok', user, userId),
                     text
+                });
+                sendToDiscordChat({
+                    platform: 'tiktok',
+                    username: formatNickname('tiktok', user, userId),
+                    text: text
                 });
             });
 
@@ -1558,6 +1672,11 @@ async function main() {
                 nickname: formatNickname('youtube', username),
                 text: messageText
             });
+            sendToDiscordChat({
+                platform: 'youtube',
+                username: formatNickname('youtube', username),
+                text: messageText
+            });
         });
 
         yt.on('superchat', scItem => {
@@ -1581,6 +1700,66 @@ async function main() {
             nickname: `YouTube`,
             text: `⚠ YouTube connection failed`
         });
+    }
+
+    /* ---------- Discord Bot ---------- */
+    try {
+        discordClient = new Client({
+          intents: [
+            GatewayIntentBits.Guilds,
+            GatewayIntentBits.GuildMessages,
+            GatewayIntentBits.MessageContent
+          ]
+        });
+
+        await discordClient.login(process.env.DISCORD_BOT_TOKEN);
+
+        discordClient.once('clientReady', async () => {
+            console.log(`✅ Discord bot logged in as ${discordClient.user.tag}`);
+
+            discordStatusChannel = await discordClient.channels.fetch(
+                process.env.DISCORD_CHANNEL_ID
+            );
+
+            discordChatChannel = await discordClient.channels.fetch(
+                process.env.DISCORD_CHAT_CHANNEL_ID
+            );
+
+            if (!discordStatusChannel || !discordChatChannel) {
+                console.error('❌ Discord channels not found');
+                return;
+            }
+
+            console.log('✅ Discord channels connected');
+        });
+
+        discordClient.on('messageCreate', async msg => {
+            // ❌ игнорируем бота
+            if (msg.author.bot) return;
+
+            // ❌ только нужный канал
+            if (msg.channel.id !== process.env.DISCORD_CHAT_CHANNEL_ID) return;
+
+            const text = msg.content?.trim();
+            if (!text) return;
+
+            const userId = msg.author.id;
+            const username = msg.author.username;
+
+            console.log(text + ` ` + username);
+
+            // 👉 Discord → overlay / Terraria / OBS
+            emit('chat', 'discord', {
+                userId,
+                nickname: `[DC] ${username}`,
+                text
+            });
+
+            // ❗ ВАЖНО: НИЧЕГО не отправляем обратно в Discord
+        });
+
+    } catch (err) {
+        console.error('⚠ Discord connection failed:', err.message);
     }
 
     // 🔄 Обновление статуса каждые 30 секунд
