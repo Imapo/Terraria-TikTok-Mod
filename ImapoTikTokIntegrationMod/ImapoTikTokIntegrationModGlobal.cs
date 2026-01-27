@@ -61,6 +61,7 @@ public class VisualLifetimeGlobalNPC : GlobalNPC
 
             // 🔥 превращаем в стрекозу
             npc.Transform(NPCID.GreenDragonfly);
+
             if (!npc.active)
                 return;
 
@@ -87,6 +88,7 @@ public class VisualLifetimeGlobalNPC : GlobalNPC
         {
             npc.active = false;
             npc.netUpdate = true;
+            return;
         }
     }
 }
@@ -324,6 +326,7 @@ public class ViewerButterflyGlobal : GlobalNPC
         {
             npc.active = false;
             npc.netUpdate = true;
+            return;
         }
     }
 
@@ -436,6 +439,7 @@ public class ViewerFireflyGlobal : GlobalNPC
         {
             npc.active = false;
             npc.netUpdate = true;
+            return;
         }
     }
 

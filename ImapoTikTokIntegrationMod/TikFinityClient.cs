@@ -19,8 +19,6 @@ using Terraria.ModLoader;
 public class TikFinityClient : ModSystem
 {
     private static List<SubscriberDatabaseEntry> subscriberDatabase = new List<SubscriberDatabaseEntry>();
-    private static ClientWebSocket socket;
-    private static CancellationTokenSource cancelToken;
     private static HashSet<string> veteranSpawnedThisSession = new HashSet<string>();
     public static HashSet<string> SubscriberIds = new HashSet<string>();
     private const int MAX_VIEWERS = 500;
@@ -30,112 +28,34 @@ public class TikFinityClient : ModSystem
     private static SafeWebSocketClient safeSocket;
     private static bool _hasShownStreamerName = false;
     private static Dictionary<string, int> likeComboCounter = new Dictionary<string, int>();
-    private const string ModDataFolderName = "ImapoTikTokIntegrationModBD";
     internal static bool worldLoaded = false;
-    private static string GetModDataRoot()
-    {
-        return Path.Combine(Main.SavePath, ModDataFolderName);
-    }
-    private static string CurrentStreamerKey = "default";
-    private static string GetStreamerPath()
-    {
-        string safeName = MakeSafeFolderName(CurrentStreamerKey);
-        return Path.Combine(GetModDataRoot(), safeName);
-    }
-    private static string MakeSafeFolderName(string name)
-    {
-        foreach (char c in Path.GetInvalidFileNameChars())
-            name = name.Replace(c, '_');
-
-        return name.Trim();
-    }
-    private static string ViewerDatabaseFilePath =>
-    Path.Combine(GetStreamerPath(), "ViewerDatabase.json");
-    private static string SubscriberDatabaseFilePath =>
-        Path.Combine(GetStreamerPath(), "SubscriberDatabase.json");
-    private static string GiftDatabaseFilePath =>
-        Path.Combine(GetStreamerPath(), "GiftDatabase.json");
-    private static string ModeratorDatabaseFilePath =>
-        Path.Combine(GetStreamerPath(), "ModeratorDatabase.json");
-    // === ОГРАНИЧЕНИЯ НА СПАВН ===
-    private static int CountActiveButterflies()
-    {
-        int count = 0;
-        foreach (var npc in Main.npc)
-        {
-            if (npc.active && npc.type == NPCID.Butterfly &&
-                npc.TryGetGlobalNPC(out ViewerButterflyGlobal g) &&
-                g.isViewerButterfly)
-                count++;
-        }
-        return count;
-    }
-
-    private static int CountActiveDragonflies()
-    {
-        int count = 0;
-        foreach (var npc in Main.npc)
-        {
-            if (npc.active && npc.type == NPCID.GreenDragonfly &&
-                npc.TryGetGlobalNPC(out LikeFloatingTextGlobal g) &&
-                !string.IsNullOrEmpty(g.viewerKey))
-                count++;
-        }
-        return count;
-    }
-
-    private static int CountActiveFireflies()
-    {
-        int count = 0;
-        foreach (var npc in Main.npc)
-        {
-            if (npc.active && npc.type == NPCID.Firefly &&
-                npc.TryGetGlobalNPC(out ViewerFireflyGlobal g) &&
-                g.isViewer)
-                count++;
-        }
-        return count;
-    }
-
-    private static int CountActiveSlimes()
-    {
-        int count = 0;
-        foreach (var npc in Main.npc)
-        {
-            if (npc.active && (
-                npc.type == NPCID.BlueSlime ||
-                npc.type == NPCID.RedSlime ||
-                npc.type == NPCID.LavaSlime ||
-                npc.type == NPCID.GoldenSlime
-            ) && npc.TryGetGlobalNPC(out ViewerSlimesGlobal g) && g.isViewer)
-                count++;
-        }
-        return count;
-    }
-    private static void EnsureStreamerDirectory()
-    {
-        Directory.CreateDirectory(GetStreamerPath());
-    }
+    private static readonly HashSet<string> sharedViewers = new();
 
     // -------------------------
     // Жизненный цикл ModSystem
     // -------------------------
     public override void OnWorldLoad()
     {
-        ImportGiftDatabase();
-        ImportViewerDatabase();
-        ImportSubscriberDatabase();
-        ImportModeratorDatabase();
+        TikFinityDatabase.ImportGiftDatabase();
+        TikFinityDatabase.ImportViewerDatabase();
+        TikFinityDatabase.ImportSubscriberDatabase();
+        TikFinityDatabase.ImportModeratorDatabase();
         StartClient();
         worldLoaded = true;
+        sharedViewers.Clear();
+        // ОЧИСТКА СПАВН-КОНТРОЛЛЕРА
+        SpawnController.OnWorldUnload(); // ← НОВАЯ СТРОКА
     }
 
     public override void OnWorldUnload()
     {
         worldLoaded = false;
         StopClientAsync().ConfigureAwait(false);
-        UpdateViewerDatabaseJson();
+        TikFinityDatabase.UpdateViewerDatabaseJson();
         veteranSpawnedThisSession.Clear();
+        sharedViewers.Clear();
+        // ОЧИСТКА СПАВН-КОНТРОЛЛЕРА
+        SpawnController.OnWorldUnload(); // ← НОВАЯ СТРОКА
     }
 
     private void StartClient()
@@ -177,80 +97,25 @@ public class TikFinityClient : ModSystem
         }
     }
 
-    private async Task ListenLoop()
-    {
-        var buffer = new byte[4096];
-        var messageBuilder = new StringBuilder();
-        while (socket != null && socket.State == WebSocketState.Open)
-        {
-            WebSocketReceiveResult result;
-            try
-            {
-                do
-                {
-                    result = await socket.ReceiveAsync(
-                        new ArraySegment<byte>(buffer),
-                        cancelToken.Token
-                    );
-                    if (result.MessageType == WebSocketMessageType.Close)
-                    {
-                        await socket.CloseAsync(
-                            WebSocketCloseStatus.NormalClosure,
-                            "Closed",
-                            CancellationToken.None
-                        );
-                        return;
-                    }
-                    messageBuilder.Append(Encoding.UTF8.GetString(buffer, 0, result.Count));
-                } while (!result.EndOfMessage);
-            }
-            catch
-            {
-                return;
-            }
-
-            string fullMessage = messageBuilder.ToString();
-            messageBuilder.Clear();
-
-            // 🔍 ЛОГИРУЕМ ПЕРВОЕ СООБЩЕНИЕ
-            if (!_hasLoggedFirstMessage)
-            {
-                _hasLoggedFirstMessage = true;
-                try
-                {
-                    var mod = ModContent.GetInstance<global::ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>();
-                    mod.Logger.Info($"[TikFinity] First message from server: {fullMessage}");
-                }
-                catch (Exception ex)
-                {
-                    // На всякий случай
-                    Console.WriteLine($"[TikFinity] Failed to log first message: {ex}");
-                }
-            }
-
-            HandleMessage(fullMessage);
-        }
-    }
-
     // -------------------------
     // Основной обработчик сообщений
     // -------------------------
     private static void SetStreamer(string newStreamer)
     {
-        newStreamer = MakeSafeFolderName(newStreamer);
-        if (newStreamer == CurrentStreamerKey)
+        newStreamer = TikFinityDatabase.MakeSafeFolderName(newStreamer);
+        if (newStreamer == TikFinityDatabase.CurrentStreamerKey)
             return;
-        CurrentStreamerKey = newStreamer;
-        Directory.CreateDirectory(GetStreamerPath());
+
+        TikFinityDatabase.CurrentStreamerKey = newStreamer;
+        Directory.CreateDirectory(TikFinityDatabase.GetStreamerPath());
+
         Main.NewText($"[TikFinity] Connected to stream: {newStreamer}", Color.Cyan);
         _hasShownStreamerName = true;
 
-        // Очистка кэшей текущей сессии
-        ModDataStorage.ViewerDatabase.Clear();
-        ModDataStorage.ModeratorDatabase.Clear();
-        ModDataStorage.SubscriberDatabase.Clear();
-        ModDataStorage.giftDatabase.Clear();
+        // Очистка кэшей текущей сессии через TikFinityDatabase
+        TikFinityDatabase.ClearCaches();
     }
+
 
     private void HandleMessage(string json)
     {
@@ -393,7 +258,7 @@ public class TikFinityClient : ModSystem
                                 giftPrice = Math.Max(1, dcInt);
                             }
 
-                            AddGiftDatabase(key, nickname, giftCount);
+                            TikFinityDatabase.AddGiftDatabase(key, nickname, giftCount);
                             GiftEnemySpawner.SpawnGiftEnemy(nickname, giftCount, giftPrice);
                             break;
                         }
@@ -430,15 +295,22 @@ public class TikFinityClient : ModSystem
 
     private static void HandleShareEvent(string key, string nickname, bool isModerator, bool isFollowing)
     {
-        // Логируем (опционально)
+        if (string.IsNullOrEmpty(key))
+            return;
+
+        // ❌ уже делился — игнор
+        if (sharedViewers.Contains(key))
+            return;
+
+        sharedViewers.Add(key);
+
         AddOrUpdateViewer(key, nickname, isSubscriber: false, isModerator, isFollowing, "Share");
 
-        if (Main.netMode == NetmodeID.MultiplayerClient) return;
+        if (Main.netMode == NetmodeID.MultiplayerClient)
+            return;
 
-        // Применяем случайный бафф
         ApplyRandomBuffFromShare();
-
-        SpawnShareSlime(nickname);
+        SpawnController.SpawnShareSlime(nickname);
     }
 
     private static void ApplyRandomBuffFromShare()
@@ -470,19 +342,19 @@ public class TikFinityClient : ModSystem
             // Список безопасных и весёлых баффов (все из Terraria по умолчанию)
             int[] shareBuffs = new int[]
             {
-        BuffID.Crate,           // Crate — +10 к защите на 10 сек
-        BuffID.Lucky,           // Lucky — шанс найти больше лута
-        BuffID.Sunflower,       // Sunflower — уменьшает spawn delay
-        BuffID.WaterCandle,     // Water Candle — ускоряет spawn мобов (весело!)
-        BuffID.Campfire,        // Campfire — +5 к регену HP
-        BuffID.SugarRush,       // Sugar Rush — +10% к скорости
-        BuffID.Gills,           // Gills — дышать под водой
-        BuffID.Shine,           // Shine — светится
-        BuffID.Mining,          // Mining — быстрее копаешь
-        BuffID.Builder,         // Builder — быстрее строишь
-        BuffID.WellFed,         // Well Fed — +2 к защите, +5% HP
-        BuffID.Lifeforce,       // Lifeforce — +20% к макс. HP
-        BuffID.Honey,           // Honey — быстрый реген HP
+                BuffID.Crate,           // Crate — +10 к защите на 10 сек
+                BuffID.Lucky,           // Lucky — шанс найти больше лута
+                BuffID.Sunflower,       // Sunflower — уменьшает spawn delay
+                BuffID.WaterCandle,     // Water Candle — ускоряет spawn мобов (весело!)
+                BuffID.Campfire,        // Campfire — +5 к регену HP
+                BuffID.SugarRush,       // Sugar Rush — +10% к скорости
+                BuffID.Gills,           // Gills — дышать под водой
+                BuffID.Shine,           // Shine — светится
+                BuffID.Mining,          // Mining — быстрее копаешь
+                BuffID.Builder,         // Builder — быстрее строишь
+                BuffID.WellFed,         // Well Fed — +2 к защите, +5% HP
+                BuffID.Lifeforce,       // Lifeforce — +20% к макс. HP
+                BuffID.Honey,           // Honey — быстрый реген HP
             };
 
             // Выбираем случайный бафф
@@ -535,175 +407,7 @@ public class TikFinityClient : ModSystem
             };
         }
 
-        UpdateModeratorDatabaseJson();
-    }
-
-    public static void ImportModeratorDatabase()
-    {
-        try
-        {
-            if (!File.Exists(ModeratorDatabaseFilePath))
-                return;
-
-            string json = File.ReadAllText(ModeratorDatabaseFilePath);
-            var list = JsonSerializer.Deserialize<List<ModeratorInfo>>(json);
-
-            if (list != null)
-            {
-                ModDataStorage.ModeratorDatabase.Clear();
-                foreach (var m in list)
-                {
-                    if (!string.IsNullOrEmpty(m.Key))
-                        ModDataStorage.ModeratorDatabase[m.Key] = m;
-                }
-
-                ModContent.GetInstance<global::ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>()
-                    .Logger.Info($"[Tikfinity] Moderator database imported from {ModeratorDatabaseFilePath}");
-            }
-        }
-        catch (Exception ex)
-        {
-            ModContent.GetInstance<global::ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>()
-                .Logger.Info($"[Tikfinity ERROR] Failed to import moderator database: {ex}");
-        }
-    }
-
-
-    public static void UpdateModeratorDatabaseJson()
-    {
-        try
-        {
-            EnsureStreamerDirectory();
-            var list = ModDataStorage.ModeratorDatabase.Values.ToList();
-            var options = new JsonSerializerOptions
-            {
-                WriteIndented = true,
-                Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
-            };
-            File.WriteAllText(
-                ModeratorDatabaseFilePath,
-                JsonSerializer.Serialize(list, options)
-            );
-        }
-        catch (Exception ex)
-        {
-            ModContent.GetInstance<global::ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>()
-                .Logger.Info($"[Tikfinity ERROR] Failed to update moderator JSON: {ex}");
-        }
-    }
-
-    public static void ImportGiftDatabase()
-    {
-        try
-        {
-            if (!File.Exists(GiftDatabaseFilePath))
-                return;
-
-            string json = File.ReadAllText(GiftDatabaseFilePath);
-            var list = JsonSerializer.Deserialize<List<GiftDatabaseEntry>>(json);
-
-            if (list != null)
-            {
-                ModDataStorage.giftDatabase.Clear();
-                foreach (var g in list)
-                {
-                    if (!string.IsNullOrEmpty(g.Key))
-                        ModDataStorage.giftDatabase[g.Key] = g;
-                }
-                RebuildGiftGiverCache();
-
-                ModContent.GetInstance<global::ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>()
-                    .Logger.Info($"[Tikfinity] Gift database imported from {GiftDatabaseFilePath}");
-            }
-        }
-        catch (Exception ex)
-        {
-            ModContent.GetInstance<global::ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>()
-                .Logger.Info($"[Tikfinity ERROR] Failed to import gift database: {ex}");
-        }
-    }
-
-    public static void UpdateGiftDatabaseJson()
-    {
-        try
-        {
-            EnsureStreamerDirectory();
-            var list = ModDataStorage.giftDatabase.Values.ToList();
-            var options = new JsonSerializerOptions
-            {
-                WriteIndented = true,
-                Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
-            };
-            File.WriteAllText(
-                GiftDatabaseFilePath,
-                JsonSerializer.Serialize(list, options)
-            );
-        }
-        catch (Exception ex)
-        {
-            ModContent.GetInstance<global::ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>()
-                .Logger.Info($"[Tikfinity ERROR] Failed to update gift JSON: {ex}");
-        }
-    }
-
-    private static void AddOrUpdateGift(string key, string nickname, int coins)
-    {
-        if (string.IsNullOrWhiteSpace(key))
-            return;
-
-        string now = DateTime.Now.ToString("dd.MM.yy HH:mm:ss");
-
-        if (ModDataStorage.giftDatabase.TryGetValue(key, out var existing))
-        {
-            existing.Nickname = nickname;
-            existing.Coins += coins; // аккумулируем монеты
-            existing.Time = now;
-        }
-        else
-        {
-            ModDataStorage.giftDatabase[key] = new GiftDatabaseEntry
-            {
-                Key = key,
-                Nickname = nickname,
-                Coins = coins,
-                Time = now
-            };
-        }
-
-        UpdateGiftDatabaseJson();
-        RebuildGiftGiverCache();
-    }
-
-    private static void AddGiftDatabase(string key, string nickname, int coins)
-    {
-        giftDatabase.Add(new GiftDatabaseEntry
-        {
-            Key = key,
-            Nickname = nickname,
-            Coins = coins,
-            Time = DateTime.Now.ToString("dd.MM.yy HH:mm:ss")
-        });
-
-        File.WriteAllText(
-            GiftDatabaseFilePath,
-            JsonSerializer.Serialize(giftDatabase, new JsonSerializerOptions
-            {
-                WriteIndented = true,
-                Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
-            })
-        );
-
-        RebuildGiftGiverCache();
-    }
-
-    private static void RebuildGiftGiverCache()
-    {
-        GiftGiverIds.Clear();
-        foreach (var g in giftDatabase)
-        {
-            if (!string.IsNullOrEmpty(g.Key))
-                GiftGiverIds.Add(g.Key);
-        }
+        TikFinityDatabase.UpdateModeratorDatabaseJson();
     }
 
     public class GiftDatabaseEntry
@@ -737,16 +441,6 @@ public class TikFinityClient : ModSystem
         }
     }
 
-    private static void RebuildSubscriberCache()
-    {
-        SubscriberIds.Clear();
-        foreach (var s in subscriberDatabase)
-        {
-            if (!string.IsNullOrEmpty(s.Key))
-                SubscriberIds.Add(s.Key);
-        }
-    }
-
     public class SubscriberDatabaseEntry
     {
         public string Key { get; set; }
@@ -757,48 +451,7 @@ public class TikFinityClient : ModSystem
         public string Time { get; set; }
     }
 
-    public static void UpdateSubscriberDatabaseJson(SubscriberDatabaseEntry entry)
-    {
-        try
-        {
-            EnsureStreamerDirectory();
-            subscriberDatabase.Add(entry);
-            var options = new JsonSerializerOptions
-            {
-                WriteIndented = true,
-                Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
-            };
-            File.WriteAllText(
-                SubscriberDatabaseFilePath,
-                JsonSerializer.Serialize(subscriberDatabase, options)
-            );
-        }
-        catch (Exception ex)
-        {
-            ModContent.GetInstance<global::ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>()
-                .Logger.Info($"[Tikfinity ERROR] Failed to update subscriber Database JSON: {ex}");
-        }
-    }
-
-    public static void ImportSubscriberDatabase()
-    {
-        try
-        {
-            if (!File.Exists(SubscriberDatabaseFilePath)) return;
-            string json = File.ReadAllText(SubscriberDatabaseFilePath);
-            var list = JsonSerializer.Deserialize<List<SubscriberDatabaseEntry>>(json);
-            if (list != null)
-            {
-                subscriberDatabase = list;
-                RebuildSubscriberCache();
-            }
-        }
-        catch (Exception ex)
-        {
-            ModContent.GetInstance<global::ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>()
-                .Logger.Info($"[Tikfinity ERROR] Failed to import subscriber Database: {ex}");
-        }
-    }
+    
 
     public class ViewerInfo
     {
@@ -812,87 +465,6 @@ public class TikFinityClient : ModSystem
         public string SourceEvent { get; set; }
         // Человекочитаемое время последнего события
         public string Time { get; set; }
-    }
-
-    // -------------------------
-    // Сохранение / загрузка базы
-    // -------------------------
-
-    public static void ExportViewerDatabase()
-    {
-        try
-        {
-            var list = ModDataStorage.ViewerDatabase.Values.ToList();
-
-            var options = new JsonSerializerOptions
-            {
-                WriteIndented = true,
-                Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
-            };
-
-            string json = JsonSerializer.Serialize(list, options);
-
-            File.WriteAllText(ViewerDatabaseFilePath, json);
-            ModContent.GetInstance<global::ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>().Logger.Info($"[Tikfinity] Viewer database exported to {ViewerDatabaseFilePath}");
-        }
-        catch (Exception ex)
-        {
-            ModContent.GetInstance<global::ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>().Logger.Info($"[Tikfinity ERROR] Failed to export viewer database: {ex}");
-        }
-    }
-
-    // -------------------------
-    // Импорт viewerDatabase из JSON
-    // -------------------------
-    public static void ImportViewerDatabase()
-    {
-        try
-        {
-            if (!File.Exists(ViewerDatabaseFilePath))
-                return;
-
-            string json = File.ReadAllText(ViewerDatabaseFilePath);
-            var list = JsonSerializer.Deserialize<List<ViewerInfo>>(json);
-
-            if (list != null)
-            {
-                ModDataStorage.ViewerDatabase.Clear();
-                foreach (var v in list)
-                {
-                    if (!string.IsNullOrEmpty(v.Key))
-                        ModDataStorage.ViewerDatabase[v.Key] = v;
-                }
-
-                ModContent.GetInstance<global::ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>().Logger.Info($"[Tikfinity] Viewer database imported from {ViewerDatabaseFilePath}");
-            }
-        }
-        catch (Exception ex)
-        {
-            ModContent.GetInstance<global::ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>().Logger.Info($"[Tikfinity ERROR] Failed to import viewer database: {ex}");
-        }
-    }
-
-    public static void UpdateViewerDatabaseJson()
-    {
-        try
-        {
-            EnsureStreamerDirectory();
-            var list = ModDataStorage.ViewerDatabase.Values.ToList();
-            var options = new JsonSerializerOptions
-            {
-                WriteIndented = true,
-                Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
-            };
-            File.WriteAllText(
-                ViewerDatabaseFilePath,
-                JsonSerializer.Serialize(list, options)
-            );
-        }
-        catch (Exception ex)
-        {
-            ModContent.GetInstance<global::ImapoTikTokIntegrationMod.ImapoTikTokIntegrationMod>()
-                .Logger.Info($"[Tikfinity ERROR] Failed to update viewer JSON: {ex}");
-        }
     }
 
     // -------------------------
@@ -1081,7 +653,7 @@ public class TikFinityClient : ModSystem
             };
         }
         TrimViewerDatabase();
-        UpdateViewerDatabaseJson();
+        TikFinityDatabase.UpdateViewerDatabaseJson();
     }
 
     private void HandleChatEvent(
@@ -1121,8 +693,8 @@ public class TikFinityClient : ModSystem
                 Time = DateTime.Now.ToString("dd.MM.yy HH:mm:ss")
             };
 
-            UpdateSubscriberDatabaseJson(entry);
-            RebuildSubscriberCache();
+            TikFinityDatabase.UpdateSubscriberDatabaseJson(entry);
+            TikFinityDatabase.RebuildSubscriberCache();
         }
         if (isModerator)
         {
@@ -1135,7 +707,7 @@ public class TikFinityClient : ModSystem
     private static void HandleSubscribeEvent(string key, string nickname, bool isModerator, bool isFollowing)
     {
         AddOrUpdateViewer(key, nickname, true, isModerator, isFollowing, "Subscribe");
-        SpawnSubscriberSlime(nickname);
+        SpawnController.SpawnSubscriberSlime(nickname);
         // --- записываем в историю ---
         var entry = new SubscriberDatabaseEntry
         {
@@ -1145,8 +717,8 @@ public class TikFinityClient : ModSystem
             EventType = "subscribe",
             Time = DateTime.Now.ToString("dd.MM.yy HH:mm:ss")
         };
-        UpdateSubscriberDatabaseJson(entry);
-        RebuildSubscriberCache();
+        TikFinityDatabase.UpdateSubscriberDatabaseJson(entry);
+        TikFinityDatabase.RebuildSubscriberCache();
     }
 
     private static void HandleJoinEvent(string key, string nickname)
@@ -1154,24 +726,24 @@ public class TikFinityClient : ModSystem
         if (string.IsNullOrEmpty(nickname))
             return;
         // 🦋 бабочка всегда
-        SpawnViewerButterfly(nickname, key);
+        SpawnController.SpawnViewerButterfly(nickname, key);
 
         // 🟡 если это подписчик — ветеран
         if (SubscriberIds.Contains(key) && !veteranSpawnedThisSession.Contains(key))
         {
-            SpawnVeteranSlime(nickname);
+            SpawnController.SpawnVeteranSlime(nickname);
             veteranSpawnedThisSession.Add(key);
         }
         // 🔥 если пользователь — модератор — спавним огненного слизня
         if (ModDataStorage.ModeratorDatabase.ContainsKey(key))
         {
-            SpawnModeratorSlime(nickname);
+            SpawnController.SpawnModeratorSlime(nickname);
         }
         // 🔥 если пользователь есть в базе дарителей — спавним золотого слизня
         if (GiftGiverIds.Contains(key))
         {
             // SpawnGifterDragonfly(nickname, key);
-            SpawnGifterSlime(nickname);
+            SpawnController.SpawnGifterSlime(nickname);
         }
     }
 
@@ -1187,7 +759,7 @@ public class TikFinityClient : ModSystem
             return;
 
         // 2. Спавним бабочку с комментарием
-        SpawnCommentFirefly(nickname, commentText);
+        SpawnController.SpawnCommentFirefly(nickname, commentText);
     }
 
     private string ExtractCommentText(JsonElement root)
@@ -1216,124 +788,6 @@ public class TikFinityClient : ModSystem
         return text;
     }
 
-    // -------------------------
-    // Остальные вспомогательные методы / спавн (твои существующие)
-    // -------------------------
-    private static string ReplaceEmojis(string input)
-    {
-        if (string.IsNullOrEmpty(input))
-            return input;
-        return input
-            .Replace("😀", ":)")
-            .Replace("😂", "xD")
-            .Replace("❤️", "<3")
-            .Replace("🔥", "FIRE")
-            .Replace("👍", "+");
-    }
-
-    private static void HandleLike(string viewerKey, string nickname, int likeIncrement)
-    {
-        if (string.IsNullOrEmpty(viewerKey))
-            return;
-
-        string cleanName = NickSanitizer.Sanitize(nickname);
-
-        if (likeComboCounter.ContainsKey(viewerKey))
-            likeComboCounter[viewerKey] += likeIncrement;
-        else
-            likeComboCounter[viewerKey] = likeIncrement;
-
-        int totalLikes = likeComboCounter[viewerKey];
-
-        Main.QueueMainThreadAction(() =>
-        {
-            // 🔒 ЖЁСТКИЙ ГЕЙТ
-            if (!worldLoaded || Main.gameMenu)
-                return;
-
-            var player = Main.LocalPlayer;
-            if (player == null || !player.active || player.dead)
-                return;
-
-            NPC existing = null;
-
-            // ❗ ТОЛЬКО ТАК, БЕЗ LINQ
-            for (int i = 0; i < Main.maxNPCs; i++)
-            {
-                NPC n = Main.npc[i];
-
-                if (n == null || !n.active)
-                    continue;
-
-                if (n.type != NPCID.GreenDragonfly)
-                    continue;
-
-                if (n.whoAmI < 0 || n.whoAmI >= Main.maxNPCs)
-                    continue;
-
-                if (!n.TryGetGlobalNPC<LikeFloatingTextGlobal>(out var g))
-                    continue;
-
-                if (g.viewerKey != viewerKey)
-                    continue;
-
-                existing = n;
-                break;
-            }
-
-            if (existing != null)
-            {
-                if (existing.whoAmI >= 0 &&
-                    existing.whoAmI < Main.maxNPCs &&
-                    existing.TryGetGlobalNPC<LikeFloatingTextGlobal>(out var g))
-                {
-                    g.likeCount = totalLikes;
-                    g.TriggerCombo(player.Center + new Vector2(0, -50));
-                    existing.netUpdate = true;
-                }
-                return;
-            }
-
-            if (CountActiveDragonflies() >= 10)
-                return;
-
-            int npcID = NPC.NewNPC(
-                player.GetSource_FromThis(),
-                (int)player.Center.X + Main.rand.Next(-30, 30),
-                (int)player.Center.Y - 50,
-                NPCID.GreenDragonfly
-            );
-
-            if (npcID < 0 || npcID >= Main.maxNPCs)
-                return;
-
-            NPC npc = Main.npc[npcID];
-            if (!npc.active)
-                return;
-
-            npc.friendly = true;
-            npc.dontTakeDamage = true;
-            npc.noGravity = true;
-            npc.noTileCollide = true;
-            npc.life = 1;
-            npc.lifeMax = 1;
-            npc.timeLeft = LikeFloatingTextGlobal.MaxLife;
-
-            if (npc.whoAmI >= 0 &&
-                npc.whoAmI < Main.maxNPCs &&
-                npc.TryGetGlobalNPC<LikeFloatingTextGlobal>(out var newG))
-            {
-                newG.likeCount = totalLikes;
-                newG.viewerKey = viewerKey;
-                newG.viewerName = cleanName;
-                newG.life = 0;
-                newG.TriggerCombo(player.Center + new Vector2(0, -50));
-            }
-
-            npc.netUpdate = true;
-        });
-    }
-
     private void ProcessLikeEvent(JsonElement root, string nickname)
     {
         int likeIncrement = 1;
@@ -1343,413 +797,7 @@ public class TikFinityClient : ModSystem
             likeIncrement = countProp.GetInt32();
         }
         string viewerKey = ExtractViewerKey(root);
-        HandleLike(viewerKey, nickname, likeIncrement);
-    }
-
-    // --- SpawnViewerButterfly / SpawnCommentFirefly / SpawnSubscriberSlime / SpawnVeteranSlime ---
-    // Использую твою существующую реализацию (обёрнутые вызовы) — просто вызываю их как есть.
-
-    private static void SpawnViewerButterfly(string nickname, string viewerId)
-    {
-        if (Main.netMode == NetmodeID.MultiplayerClient) return;
-        if (CountActiveButterflies() >= 20) return; // ⚠️ лимит
-
-        string cleanName = NickSanitizer.Sanitize(nickname).Trim();
-        if (string.IsNullOrWhiteSpace(cleanName)) cleanName = viewerId;
-
-        // Не дублируем
-        Main.QueueMainThreadAction(() =>
-        {
-            if (!worldLoaded || Main.gameMenu)
-                return;
-
-            if (Main.npc.Any(n =>
-                n.active && n.type == NPCID.Butterfly &&
-                n.whoAmI >= 0 && n.whoAmI < Main.maxNPCs && // ✅ проверка диапазона
-                n.TryGetGlobalNPC(out ViewerButterflyGlobal g) &&
-                g.isViewerButterfly && g.rawId == viewerId))
-                return;
-
-            var player = Main.LocalPlayer;
-            if (player == null || !player.active)
-                return; // проверка игрока
-
-            int npcID = NPC.NewNPC(
-                player.GetSource_FromThis(),
-                (int)player.position.X + Main.rand.Next(-200, 200),
-                (int)player.position.Y - 100,
-                NPCID.Butterfly
-            );
-
-            if (npcID >= 0 && npcID < Main.maxNPCs) // ✅ проверка диапазона
-            {
-                NPC npc = Main.npc[npcID];
-                if (!npc.active) return;
-
-                if (npc.whoAmI >= 0 && npc.whoAmI < Main.maxNPCs && // ✅ ещё раз перед TryGetGlobalNPC
-                    npc.TryGetGlobalNPC<ViewerButterflyGlobal>(out var g))
-                {
-                    g.isViewerButterfly = true;
-                    g.viewerName = cleanName;
-                    g.rawId = viewerId;
-                    g.lifetime = 0;
-                }
-            }
-        });
-    }
-
-    private static void SpawnCommentFirefly(string nickname, string comment)
-    {
-        if (Main.netMode == NetmodeID.MultiplayerClient) return;
-        if (CountActiveFireflies() >= 15) return; // ⚠️ лимит
-
-        Main.QueueMainThreadAction(() =>
-        {
-            if (!worldLoaded || Main.gameMenu)
-                return;
-
-            string cleanName = NickSanitizer.Sanitize(nickname);
-
-            // 🔒 БЕЗОПАСНАЯ проверка на дубликат
-            if (Main.npc.Any(n =>
-                n.active &&
-                n.type == NPCID.Firefly &&
-                n.whoAmI >= 0 && n.whoAmI < Main.maxNPCs &&
-                n.TryGetGlobalNPC(out ViewerFireflyGlobal g) &&
-                g.viewerName == cleanName))
-                return;
-
-            var player = Main.LocalPlayer;
-            if (player == null || !player.active || player.dead)
-                return;
-
-            int npcID = NPC.NewNPC(
-                player.GetSource_FromThis(),
-                (int)player.position.X + Main.rand.Next(-300, 300),
-                (int)player.position.Y - 100,
-                NPCID.Firefly
-            );
-
-            // 🔒 ПРОВЕРКА ИНДЕКСА
-            if (npcID < 0 || npcID >= Main.maxNPCs)
-                return;
-
-            NPC npc = Main.npc[npcID];
-            if (!npc.active)
-                return;
-
-            // 🔒 TryGetGlobalNPC только после проверок
-            if (npc.whoAmI >= 0 && npc.whoAmI < Main.maxNPCs &&
-                npc.TryGetGlobalNPC<ViewerFireflyGlobal>(out var g))
-            {
-                comment = ReplaceEmojis(comment);
-
-                g.viewerName = cleanName;
-                g.commentText = comment;
-                g.isComment = true;
-                g.isViewer = true;
-
-                npc.timeLeft = 300;
-                npc.netUpdate = true;
-            }
-
-            string chatMessage = $"[Чат] {nickname}: {comment}";
-            if (Main.netMode == NetmodeID.SinglePlayer)
-                Main.NewText(chatMessage, 255, 255, 255);
-            else if (Main.netMode == NetmodeID.Server)
-                Terraria.Chat.ChatHelper.BroadcastChatMessage(
-                    Terraria.Localization.NetworkText.FromLiteral(chatMessage),
-                    new Color(180, 255, 180)
-                );
-        });
-    }
-
-    private static void SpawnSubscriberSlime(string nickname)
-    {
-        if (Main.netMode == NetmodeID.MultiplayerClient) return;
-        if (CountActiveSlimes() >= 10) return; // ⚠️ общий лимит на всех слизней
-
-        Main.QueueMainThreadAction(() =>
-        {
-            if (!worldLoaded || Main.gameMenu)
-                return;
-
-            var player = Main.LocalPlayer;
-            if (player == null || !player.active || player.dead)
-                return;
-
-            int npcID = NPC.NewNPC(
-                player.GetSource_FromThis(),
-                (int)player.position.X + Main.rand.Next(-200, 200),
-                (int)player.position.Y,
-                NPCID.BlueSlime
-            );
-
-            // 🔒 ОБЯЗАТЕЛЬНАЯ проверка индекса
-            if (npcID < 0 || npcID >= Main.maxNPCs)
-                return;
-
-            NPC npc = Main.npc[npcID];
-            if (!npc.active)
-                return;
-
-            // === базовые параметры ===
-            npc.friendly = true;
-            npc.damage = 20;
-            npc.lifeMax = 250;
-            npc.life = 250;
-            npc.defense = 15;
-            npc.knockBackResist = 0.5f;
-            npc.chaseable = true;
-            npc.target = player.whoAmI;
-
-            // ⏳ не используем int.MaxValue — это безопаснее
-            npc.timeLeft = 60 * 60 * 5; // 5 минут
-
-            // 🔒 GlobalNPC — только после проверок
-            if (npc.whoAmI >= 0 && npc.whoAmI < Main.maxNPCs &&
-                npc.TryGetGlobalNPC<ViewerSlimesGlobal>(out var g))
-            {
-                g.viewerName = NickSanitizer.Sanitize(nickname);
-                g.isViewer = true;
-            }
-
-            if (npc.whoAmI >= 0 && npc.whoAmI < Main.maxNPCs &&
-                npc.TryGetGlobalNPC<VisualLifetimeGlobalNPC>(out var lifetime))
-            {
-                lifetime.SetLifetime(60);
-            }
-
-            npc.netUpdate = true;
-
-            Main.NewText($"[Новый подписчик] {nickname}!", 255, 10, 100);
-        });
-    }
-
-    private static void SpawnVeteranSlime(string nickname)
-    {
-        if (Main.netMode == NetmodeID.MultiplayerClient) return;
-        if (CountActiveSlimes() >= 10) return;
-
-        Main.QueueMainThreadAction(() =>
-        {
-            if (!worldLoaded || Main.gameMenu)
-                return;
-
-            var player = Main.LocalPlayer;
-            if (player == null || !player.active || player.dead)
-                return;
-
-            int npcID = NPC.NewNPC(
-                player.GetSource_FromThis(),
-                (int)player.position.X + Main.rand.Next(-200, 200),
-                (int)player.position.Y,
-                NPCID.RedSlime
-            );
-
-            if (npcID < 0 || npcID >= Main.maxNPCs)
-                return;
-
-            NPC npc = Main.npc[npcID];
-            if (!npc.active)
-                return;
-
-            npc.friendly = true;
-            npc.damage = 20;
-            npc.lifeMax = 500;
-            npc.life = 500;
-            npc.defense = 40;
-            npc.knockBackResist = 0.3f;
-
-            npc.timeLeft = 60 * 60 * 5; // 5 минут
-
-            if (npc.whoAmI >= 0 && npc.whoAmI < Main.maxNPCs &&
-                npc.TryGetGlobalNPC<ViewerSlimesGlobal>(out var g))
-            {
-                g.viewerName = NickSanitizer.Sanitize(nickname);
-                g.isViewer = true;
-                g.isVeteran = true;
-            }
-
-            if (npc.whoAmI >= 0 && npc.whoAmI < Main.maxNPCs &&
-                npc.TryGetGlobalNPC<VisualLifetimeGlobalNPC>(out var lifetime))
-            {
-                lifetime.SetLifetime(150);
-            }
-
-            npc.netUpdate = true;
-
-            Main.NewText($"[Подписчик] {nickname} прибыл!", 255, 215, 0);
-        });
-    }
-
-    private static void SpawnModeratorSlime(string nickname)
-    {
-        if (Main.netMode == NetmodeID.MultiplayerClient) return;
-
-        Main.QueueMainThreadAction(() =>
-        {
-            if (!worldLoaded || Main.gameMenu)
-                return;
-
-            var player = Main.LocalPlayer;
-            if (player == null || !player.active || player.dead)
-                return;
-
-            int npcID = NPC.NewNPC(
-                player.GetSource_FromThis(),
-                (int)player.position.X + Main.rand.Next(-200, 200),
-                (int)player.position.Y,
-                NPCID.LavaSlime
-            );
-
-            if (npcID < 0 || npcID >= Main.maxNPCs)
-                return;
-
-            NPC npc = Main.npc[npcID];
-            if (!npc.active)
-                return;
-
-            npc.friendly = true;
-            npc.damage = 25;
-            npc.lifeMax = 400;
-            npc.life = 400;
-            npc.defense = 40;
-            npc.knockBackResist = 0.5f;
-
-            npc.timeLeft = 60 * 60 * 5;
-
-            if (npc.whoAmI >= 0 && npc.whoAmI < Main.maxNPCs &&
-                npc.TryGetGlobalNPC<ViewerSlimesGlobal>(out var g))
-            {
-                g.viewerName = NickSanitizer.Sanitize(nickname);
-                g.isViewer = true;
-                g.isModerator = true;
-            }
-
-            if (npc.whoAmI >= 0 && npc.whoAmI < Main.maxNPCs &&
-                npc.TryGetGlobalNPC<VisualLifetimeGlobalNPC>(out var lifetime))
-            {
-                lifetime.SetLifetime(300);
-            }
-
-            npc.netUpdate = true;
-
-            Main.NewText($"[Модератор] {nickname} прибыл!", 255, 80, 20);
-        });
-    }
-
-    private static void SpawnGifterSlime(string nickname)
-    {
-        if (Main.netMode == NetmodeID.MultiplayerClient) return;
-        if (CountActiveSlimes() >= 10) return;
-
-        Main.QueueMainThreadAction(() =>
-        {
-            if (!worldLoaded || Main.gameMenu)
-                return;
-
-            var player = Main.LocalPlayer;
-            if (player == null || !player.active || player.dead)
-                return;
-
-            int npcID = NPC.NewNPC(
-                player.GetSource_FromThis(),
-                (int)player.position.X + Main.rand.Next(-200, 200),
-                (int)player.position.Y,
-                NPCID.GoldenSlime
-            );
-
-            if (npcID < 0 || npcID >= Main.maxNPCs)
-                return;
-
-            NPC npc = Main.npc[npcID];
-            if (!npc.active)
-                return;
-
-            npc.friendly = true;
-            npc.damage = 20;
-            npc.lifeMax = 500;
-            npc.life = 500;
-            npc.defense = 40;
-            npc.knockBackResist = 0.3f;
-
-            npc.timeLeft = 60 * 60 * 5;
-
-            if (npc.whoAmI >= 0 && npc.whoAmI < Main.maxNPCs &&
-                npc.TryGetGlobalNPC<ViewerSlimesGlobal>(out var g))
-            {
-                g.viewerName = NickSanitizer.Sanitize(nickname);
-                g.isViewer = true;
-                g.isGifter = true;
-            }
-
-            if (npc.whoAmI >= 0 && npc.whoAmI < Main.maxNPCs &&
-                npc.TryGetGlobalNPC<VisualLifetimeGlobalNPC>(out var lifetime))
-            {
-                lifetime.SetLifetime(300);
-            }
-
-            npc.netUpdate = true;
-
-            Main.NewText($"[Даритель] {nickname} прибыл!", 255, 215, 0);
-        });
-    }
-
-    private static void SpawnShareSlime(string nickname)
-    {
-        if (Main.netMode == NetmodeID.MultiplayerClient) return;
-
-        Main.QueueMainThreadAction(() =>
-        {
-            if (!worldLoaded || Main.gameMenu)
-                return;
-
-            var player = Main.LocalPlayer;
-            if (player == null || !player.active || player.dead)
-                return;
-
-            int npcID = NPC.NewNPC(
-                player.GetSource_FromThis(),
-                (int)player.Center.X + Main.rand.Next(-200, 200),
-                (int)player.Center.Y - 100,
-                NPCID.RainbowSlime
-            );
-
-            if (npcID < 0 || npcID >= Main.maxNPCs)
-                return;
-
-            NPC npc = Main.npc[npcID];
-            if (!npc.active)
-                return;
-
-            npc.friendly = true;
-            npc.damage = 10;
-            npc.lifeMax = 150;
-            npc.life = 150;
-            npc.defense = 20;
-            npc.knockBackResist = 0.5f;
-
-            npc.timeLeft = 60 * 60 * 3;
-
-            if (npc.whoAmI >= 0 && npc.whoAmI < Main.maxNPCs &&
-                npc.TryGetGlobalNPC<ViewerSlimesGlobal>(out var g))
-            {
-                g.isViewer = true;
-                g.isRainbow = true;
-                g.viewerName = NickSanitizer.Sanitize(nickname);
-            }
-
-            if (npc.whoAmI >= 0 && npc.whoAmI < Main.maxNPCs &&
-                npc.TryGetGlobalNPC<VisualLifetimeGlobalNPC>(out var lifetime))
-            {
-                lifetime.SetLifetime(15);
-            }
-
-            npc.netUpdate = true;
-
-            Main.NewText($"[Share] {nickname} поделился стримом!", new Color(255, 182, 193));
-        });
+        SpawnController.SpawnLikeDragonfly(viewerKey, nickname, likeIncrement);
     }
 
     #region TEST METHODS
@@ -1805,7 +853,7 @@ public class TikFinityClient : ModSystem
             UserName = "SUB_" + TikTestFactory.RandomName()
         };
 
-        SpawnVeteranSlime(fakeJoinSubscriber.UserName);
+        SpawnController.SpawnVeteranSlime(fakeJoinSubscriber.UserName);
         Main.NewText($"[TEST] Subscriber joined: {fakeJoinSubscriber.UserName}", Color.Gold);
     }
 
@@ -1817,7 +865,7 @@ public class TikFinityClient : ModSystem
             UserName = "MOD_" + TikTestFactory.RandomName()
         };
 
-        SpawnModeratorSlime(fakeJoinModerator.UserName);
+        SpawnController.SpawnModeratorSlime(fakeJoinModerator.UserName);
         Main.NewText($"[TEST] Moderator joined: {fakeJoinModerator.UserName}", Color.Red);
     }
 
@@ -1829,7 +877,7 @@ public class TikFinityClient : ModSystem
             UserName = "Gift_" + TikTestFactory.RandomName()
         };
 
-        SpawnGifterSlime(fakeJoinGifter.UserName);
+        SpawnController.SpawnGifterSlime(fakeJoinGifter.UserName);
         Main.NewText($"[TEST] Gifter joined: {fakeJoinGifter.UserName}", Color.Red);
     }
 
@@ -1838,7 +886,7 @@ public class TikFinityClient : ModSystem
         string viewerKey = "TEST_VIEWER";
         string name = "TEST_USER";
 
-        HandleLike(viewerKey, name, count);
+        SpawnController.SpawnLikeDragonfly(viewerKey, name, count);
 
         Main.NewText($"[TEST] Likes x{count} от {name}", Color.HotPink);
     }
