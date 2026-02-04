@@ -40,6 +40,8 @@ body {
 
 /* ===== CHAT SECTION ===== */
 #log {
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* IE/Edge */
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -52,6 +54,8 @@ body {
 
 /* ===== Message card ===== */
 .msg {
+  will-change: transform, opacity; /* Предупреждаем браузер об анимациях */
+  contain: content; /* Изолируем для оптимизации */
   display: flex;
   align-items: flex-start;
   gap: 8px;
@@ -67,6 +71,7 @@ body {
   to {
     opacity: 1;
     transform: translateY(0);
+    transform: translate3d(0, 0, 0); /* Для аппаратного ускорения */
   }
 }
 
@@ -124,6 +129,7 @@ body {
   padding-right: 5px;
   border-right: 1px dashed #aaa;
   text-shadow: -1px -1px 1px #000;
+  vertical-align: bottom;
 }
 
 .gift img {
@@ -307,6 +313,47 @@ body {
   border-left: 5px solid #5865F2;
   background: rgba(40, 43, 48, 0.9);
 }
+
+/* ===== GIFT COMBO ANIMATIONS ===== */
+
+.gift {
+  transition: transform 0.2s ease;
+}
+
+.gift.pulse {
+  transform: scale(1.25);
+}
+
+.gift.finish {
+  animation: gift-finish 0.6s ease forwards;
+}
+
+@keyframes gift-finish {
+  0% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  70% {
+    transform: scale(1.4);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1.6);
+    opacity: 0;
+  }
+}
+
+/* Усиление при больших комбо */
+.gift.big {
+  color: #ffd700;
+  text-shadow: 0 0 10px gold;
+}
+
+.gift.combo-done {
+  transform: scale(1);
+  color: #ffd700;
+  transition: transform 0.3s ease, color 0.3s ease;
+}
 </style>
 </head>
 
@@ -353,6 +400,9 @@ const currentTimeEl = currentTrackEl.querySelector('.current-time');
 const totalTimeEl = currentTrackEl.querySelector('.total-time');
 const remainingTimeEl = document.getElementById('remaining-time');
 const tiktokLikes = new Map();
+const giftCombos = new Map(); // key -> timer
+const QUEUE_UPDATE_INTERVAL = 500; // Обновлять не чаще чем раз в 500ms
+const MAX_CHAT_MESSAGES = 40;
 const icons = {
   tiktok: `
     <svg class="icon" viewBox="0 0 24 24" fill="currentColor">
@@ -375,6 +425,200 @@ const icons = {
         <path d="M20.3 4.4A19.5 19.5 0 0 0 15.9 3l-.2.4a18.1 18.1 0 0 1 3.9 1.5 13.3 13.3 0 0 0-11.8 0A18.1 18.1 0 0 1 11.7 3l-.2-.4a19.5 19.5 0 0 0-4.4 1.4C3.9 8.1 3 12 3 15.9a19.9 19.9 0 0 0 5.1 2.6l.6-.8a12.3 12.3 0 0 1-2-1c.2-.2.4-.3.6-.5a13.4 13.4 0 0 0 12.6 0l.6.5a12.3 12.3 0 0 1-2 1l.6.8a19.9 19.9 0 0 0 5.1-2.6c0-3.9-.9-7.8-3.7-11.5z"/>
       </svg>`
 };
+// После объявления других переменных
+const giftsStorage = {
+  data: new Map(),
+  saveToStorage() {
+    const data = {};
+    for (const [userId, userData] of this.data.entries()) {
+      data[userId] = userData; // Без преобразования, если gifts уже объект
+    }
+    localStorage.setItem('stream_gifts_' + new Date().toDateString(), JSON.stringify(data));
+  },
+  // Загружаем из localStorage
+  loadFromStorage() {
+      const saved = localStorage.getItem('stream_gifts_' + new Date().toDateString());
+      if (saved) {
+        try {
+          const data = JSON.parse(saved);
+          for (const [userId, value] of Object.entries(data)) {
+            // Конвертируем старую структуру в новую
+            if (typeof value.gifts === 'number') {
+              // Старая структура: gifts был числом
+              this.data.set(userId, {
+                nickname: value.nickname,
+                gifts: { 'Подарок': { amount: value.gifts, icon: null } },
+                lastActive: value.lastActive || Date.now()
+              });
+            } else {
+              // Новая структура или уже преобразованная
+              this.data.set(userId, value);
+            }
+          }
+          console.log('Загружены сохраненные подарки за сегодня');
+        } catch (e) {
+          console.error('Ошибка загрузки подарков:', e);
+          // Очищаем поврежденные данные
+          this.data.clear();
+        }
+      }
+    },
+  // Добавить подарок
+  addGift(userId, nickname, giftName, amount = 1, giftIcon = null) {
+    if (!this.data.has(userId)) {
+        this.data.set(userId, {
+            nickname,
+            gifts: {}, // giftName -> {amount, icon}
+            lastActive: Date.now()
+        });
+    }
+    
+    const userData = this.data.get(userId);
+    userData.nickname = nickname;
+    userData.lastActive = Date.now();
+    
+    if (!userData.gifts[giftName]) {
+        userData.gifts[giftName] = {
+            amount: 0,
+            icon: giftIcon // 👈 Сохраняем иконку
+        };
+    }
+    
+    userData.gifts[giftName].amount += amount;
+    // Обновляем иконку если её не было
+    if (giftIcon && !userData.gifts[giftName].icon) {
+        userData.gifts[giftName].icon = giftIcon;
+    }
+    
+    this.saveToStorage();
+    return this.getUserTotal(userId);
+  },
+  // Получить общее количество подарков пользователя
+  getUserTotal(userId) {
+      if (!this.data.has(userId)) return 0;
+      const userData = this.data.get(userId);
+  
+      console.log(`getUserTotal для ${userId}:`, userData); // отладка
+  
+      // Если gifts - это число
+      if (typeof userData.gifts === 'number') {
+        return userData.gifts;
+      }
+  
+      // Если gifts - это объект
+      if (userData.gifts && typeof userData.gifts === 'object') {
+        let total = 0;
+    
+        // Перебираем все подарки
+        for (const [giftName, giftData] of Object.entries(userData.gifts)) {
+          if (typeof giftData === 'number') {
+            total += giftData;
+          } else if (giftData && typeof giftData === 'object') {
+            total += Number(giftData.amount) || 0;
+          }
+        }
+    
+        console.log(`Вычисленный total: ${total}`); // отладка
+        return total;
+      }
+  
+      return 0;
+    },
+  // Получить список всех подарков пользователя
+  getUserGifts(userId) {
+    if (!this.data.has(userId)) return [];
+    const userGifts = this.data.get(userId).gifts;
+    return Object.entries(userGifts).map(([name, data]) => ({ 
+        name, 
+        amount: data.amount,
+        icon: data.icon // 👈 Возвращаем иконку
+    }));
+  },
+  // Получить топ донатеров
+  getTopDonaters(limit = 10) {
+      const sorted = Array.from(this.data.entries())
+        .map(([userId, data]) => {
+          let total = 0;
+      
+          // Считаем общее количество подарков
+          if (typeof data.gifts === 'number') {
+            total = data.gifts;
+          } else if (data.gifts && typeof data.gifts === 'object') {
+            total = Object.values(data.gifts)
+              .reduce((sum, giftData) => {
+                if (typeof giftData === 'number') return sum + giftData;
+                if (giftData && typeof giftData === 'object') return sum + (giftData.amount || 0);
+                return sum;
+              }, 0);
+          }
+      
+          return {
+            userId,
+            nickname: data.nickname,
+            total: total,
+            gifts: (typeof data.gifts === 'object') 
+              ? Object.entries(data.gifts).map(([name, giftData]) => ({ 
+                  name, 
+                  amount: (typeof giftData === 'number') ? giftData : (giftData?.amount || 0),
+                  icon: (giftData && typeof giftData === 'object') ? giftData.icon : null
+                }))
+              : [{ name: 'Подарок', amount: total, icon: null }]
+          };
+        })
+        .sort((a, b) => b.total - a.total)
+        .slice(0, limit);
+      return sorted;
+    },
+  // Очистить старые данные (старше 24 часов)
+  cleanupOld() {
+      const now = Date.now();
+      const DAY_MS = 24 * 60 * 60 * 1000;
+      for (const [userId, data] of this.data.entries()) {
+        if (now - data.lastActive > DAY_MS) {
+          this.data.delete(userId);
+        }
+      }
+      this.saveToStorage();
+    },
+  migrateOldData() {
+      const keys = Object.keys(localStorage).filter(key => key.startsWith('stream_gifts_'));
+      keys.forEach(key => {
+        try {
+          const oldData = JSON.parse(localStorage.getItem(key));
+          const migrated = {};
+      
+          for (const [userId, value] of Object.entries(oldData)) {
+            if (typeof value === 'number') {
+              // Старая версия: просто число - общее количество подарков
+              migrated[userId] = {
+                nickname: 'Пользователь',
+                gifts: { 'Подарок': { amount: value, icon: null } },
+                lastActive: Date.now()
+              };
+            } else if (value && typeof value === 'object') {
+              // Проверяем структуру gifts
+              if (typeof value.gifts === 'number') {
+                // gifts - это число, нужно преобразовать
+                migrated[userId] = {
+                  nickname: value.nickname || 'Пользователь',
+                  gifts: { 'Подарок': { amount: value.gifts, icon: null } },
+                  lastActive: value.lastActive || Date.now()
+                };
+              } else {
+                // Уже правильная структура
+                migrated[userId] = value;
+              }
+            }
+          }
+      
+          localStorage.setItem(key, JSON.stringify(migrated));
+          console.log(`Мигрированы данные из ${key}`);
+        } catch (e) {
+          console.error(`Ошибка миграции ${key}:`, e);
+        }
+      });
+    },
+};
 let songQueueDisplay = {
   current: null,
   list: []
@@ -382,6 +626,12 @@ let songQueueDisplay = {
 let player;
 let progressInterval;
 let currentVideoDuration = 0;
+let ws;
+let wsReconnectInterval;
+let lastQueueUpdate = 0;
+
+giftsStorage.loadFromStorage();
+giftsStorage.migrateOldData();
 
 function getGiftMap(el) {
   if (!el._gifts) el._gifts = new Map();
@@ -490,7 +740,16 @@ function updateCurrentTrack() {
 
 // функция для обновления очереди
 function displayQueue() {
-    // очищаем очередь
+  const now = Date.now();
+  if (now - lastQueueUpdate < QUEUE_UPDATE_INTERVAL) {
+    return;
+  }
+  lastQueueUpdate = now;
+    // Кэшируем текущее состояние
+    const queueCache = JSON.stringify(songQueueDisplay.list.slice(0, 3));
+    if (queueSectionEl.dataset.cache === queueCache) return;
+    
+    queueSectionEl.dataset.cache = queueCache;
     queueSectionEl.innerHTML = '';
 
     // Показываем очередь только если есть треки
@@ -549,11 +808,15 @@ function scrollChatToBottom() {
   // Ждем следующего цикла рендеринга
   setTimeout(() => {
     logEl.scrollTop = logEl.scrollHeight;
-  }, 50);
+  }, 1000);
 }
 
 // В функции logMessage добавьте вызов автоскролла
 function logMessage(platform, userId, nickname, text, isError = false, extraClass = '', time = '') {
+  const DISABLE_ANIMATIONS_THRESHOLD = 30;
+  if (logEl.children.length > DISABLE_ANIMATIONS_THRESHOLD) {
+    document.documentElement.style.setProperty('--blur', 'none');
+  }
   const isSystem = nickname === 'System' || platform === 'WS';
   const el = document.createElement('div');
   el.className = `msg ${platform} ${isError ? 'error' : ''} ${isSystem ? 'system' : ''} ${extraClass}`;
@@ -573,18 +836,33 @@ function logMessage(platform, userId, nickname, text, isError = false, extraClas
   logEl.appendChild(el);
 
   // Ограничиваем количество сообщений в чате
-  while (logEl.children.length > 50) {
-    logEl.removeChild(logEl.firstChild);
-  }
+  if (logEl.children.length > MAX_CHAT_MESSAGES) {
+    // Удаляем сразу несколько старых сообщений
+    const toRemove = logEl.children.length - MAX_CHAT_MESSAGES;
+    for (let i = 0; i < toRemove; i++) {
+    if (logEl.firstChild) {
+        logEl.removeChild(logEl.firstChild);
+    }
+   }
+}
 
   // Автоскролл к новому сообщению
   scrollChatToBottom();
 }
 
-/* ===== WebSocket ===== */
-const ws = new WebSocket("ws://127.0.0.1:21214");
-
 function play(videoId) {
+  if (!videoId || videoId.trim() === '') {
+    console.warn('Пустой videoId');
+    return;
+  }
+  
+  // Проверяем, готов ли API
+  if (typeof YT === 'undefined' || typeof YT.Player === 'undefined') {
+    console.error('YouTube API не загружена');
+    setTimeout(() => play(videoId), 1000); // Повторная попытка
+    return;
+  }
+
   if (!player) {
     player = new YT.Player('player', {
       height: '0',
@@ -647,189 +925,268 @@ function play(videoId) {
   }
 }
 
-ws.onopen = () =>
-  logMessage('WS', 0, 'System', 'WebSocket подключен');
+/* ===== WebSocket ===== */
+function connectWebSocket() {
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+    return;
+  }
+  
+  ws = new WebSocket("ws://127.0.0.1:21214");
+  
+  ws.onopen = () => {
+    console.log('✅ WebSocket подключен');
+    clearInterval(wsReconnectInterval);
+  };
+  
+  ws.onclose = () => {
+    console.log('⚠ WebSocket отключен, переподключение через 5 секунд...');
+    wsReconnectInterval = setTimeout(connectWebSocket, 5000);
+  };
+  
+  ws.onerror = (error) => {
+    console.error('❌ Ошибка WebSocket:', error);
+  };
+  
+  // оставьте ваш существующий ws.onmessage
+  ws.onmessage = e => {
+      try {
+        const d = JSON.parse(e.data);
 
-ws.onclose = () =>
-  logMessage('WS', 0, 'System', 'WebSocket отключен', true);
+        // ===== CHAT HISTORY =====
+        if (d.event === 'chatHistory' && Array.isArray(d.data)) {
+          logEl.innerHTML = '';
 
-ws.onerror = () =>
-  logMessage('WS', 0, 'System', 'Ошибка WebSocket', true);
+          d.data.forEach(msg => {
+              logMessage(
+                msg.platform,
+                msg.userId,
+                msg.nickname,
+                msg.text,
+                false,
+                msg.extraClass || '',
+                msg.time // ⏱
+              );
+            });
 
-ws.onmessage = e => {
-  try {
-    const d = JSON.parse(e.data);
+          scrollChatToBottom();
+          return; // ВАЖНО: дальше не обрабатываем
+        }
 
-    // ===== CHAT HISTORY =====
-    if (d.event === 'chatHistory' && Array.isArray(d.data)) {
-      logEl.innerHTML = '';
-
-      d.data.forEach(msg => {
-          logMessage(
-            msg.platform,
-            msg.userId,
-            msg.nickname,
-            msg.text,
-            false,
-            msg.extraClass || '',
-            msg.time // ⏱
-          );
-        });
-
-      scrollChatToBottom();
-      return; // ВАЖНО: дальше не обрабатываем
-    }
-
-    if(d.event === 'music') {
-        songQueueDisplay.current = {
-            videoId: d.data.videoId,
-            author: d.data.author || 'Unknown',
-            title: d.data.title || 'Unknown',
-            requester: d.data.requester || 'Неизвестно'
-        };
-        updateCurrentTrack();
-        displayQueue();
+        if(d.event === 'music') {
+            songQueueDisplay.current = {
+                videoId: d.data.videoId,
+                author: d.data.author || 'Unknown',
+                title: d.data.title || 'Unknown',
+                requester: d.data.requester || 'Неизвестно'
+            };
+            updateCurrentTrack();
+            displayQueue();
     
-        if (d.data.videoId && d.data.videoId.trim() !== '') {
-            play(d.data.videoId);
-        } else {
-            stopProgressUpdate();
-            if (player && player.stopVideo) {
-                player.stopVideo();
+            if (d.data.videoId && d.data.videoId.trim() !== '') {
+                play(d.data.videoId);
+            } else {
+                stopProgressUpdate();
+                if (player && player.stopVideo) {
+                    player.stopVideo();
+                }
             }
         }
-    }
 
-    if(d.event === 'queue') {
-        songQueueDisplay.list = d.data.list || [];
-        updateCurrentTrack();
-        displayQueue();
-    }
-
-    if(d.event === 'trackEnded') {
-      if(songQueueDisplay.list.length > 0) {
-        songQueueDisplay.current = songQueueDisplay.list.shift();
-      } else {
-        songQueueDisplay.current = null;
-      }
-      updateCurrentTrack();
-      displayQueue();
-      stopProgressUpdate();
-    }
-
-    if(d.event === 'music_stop') {
-      songQueueDisplay.current = null;
-      songQueueDisplay.list = [];
-      updateCurrentTrack();
-      displayQueue();
-      stopProgressUpdate();
-      if (player && player.stopVideo) {
-        player.stopVideo();
-      }
-    }
-
-    if (d.event === "music_pause") {
-        if (player && typeof player.pauseVideo === 'function') {
-            player.pauseVideo();
+        if(d.event === 'queue') {
+            songQueueDisplay.list = d.data.list || [];
+            updateCurrentTrack();
+            displayQueue();
         }
-    }
 
-    if (d.event === "music_play") {
-        if (player && typeof player.playVideo === 'function') {
-            player.playVideo();
+        if(d.event === 'trackEnded') {
+          if(songQueueDisplay.list.length > 0) {
+            songQueueDisplay.current = songQueueDisplay.list.shift();
+          } else {
+            songQueueDisplay.current = null;
+          }
+          updateCurrentTrack();
+          displayQueue();
+          stopProgressUpdate();
         }
-    }
 
-    if (d.event === 'like' && d.platform === 'tiktok') {
-      const { userId, nickname, amount } = d.data;
+        if(d.event === 'music_stop') {
+          songQueueDisplay.current = null;
+          songQueueDisplay.list = [];
+          updateCurrentTrack();
+          displayQueue();
+          stopProgressUpdate();
+          if (player && player.stopVideo) {
+            player.stopVideo();
+          }
+        }
 
-      const prev = tiktokLikes.get(userId) || 0;
-      const total = prev + amount;
-      tiktokLikes.set(userId, total);
+        if (d.event === "music_pause") {
+            if (player && typeof player.pauseVideo === 'function') {
+                player.pauseVideo();
+            }
+        }
 
-      const newNick = `[TikTok] ${nickname} ❤️×${total}`;
-      updateNicknameEverywhere(userId, newNick);
-    }
+        if (d.event === "music_play") {
+            if (player && typeof player.playVideo === 'function') {
+                player.playVideo();
+            }
+        }
 
-    if (d.event === 'chat') {
-      logMessage(
-        d.platform,
-        d.data.userId,
-        d.data.nickname,
-        d.data.text,
-        false,
-        '',
-        d.data.time // ⏱
-      );
-    }
+        if (d.event === 'like' && d.platform === 'tiktok') {
+          const { userId, nickname, amount } = d.data;
 
-    if (d.event === 'gift') {
-        console.log('GIFT RECEIVED', d);
+          const prev = tiktokLikes.get(userId) || 0;
+          const total = prev + amount;
+          tiktokLikes.set(userId, total);
 
-        const { userId, nickname, gift, amount = 1 } = d.data;
-        const giverId = 'giver_' + userId;
+          const newNick = `[TikTok] ${nickname} ❤️×${total}`;
+          updateNicknameEverywhere(userId, newNick);
+        }
 
-        let giver = document.getElementById(giverId);
+        if (d.event === 'chat') {
+          logMessage(
+            d.platform,
+            d.data.userId,
+            d.data.nickname,
+            d.data.text,
+            false,
+            '',
+            d.data.time // ⏱
+          );
+        }
 
-        // 🆕 если первый подарок от зрителя
-        if (!giver) {
-            giver = document.createElement('div');
-            giver.className = 'msg gift-message';
-            giver.id = giverId;
+        if (d.event === 'gift') {
+            console.log('GIFT RECEIVED', d);
+            const { userId, nickname, gift, amount = 1 } = d.data;
+            const giftName = gift?.name || 'Подарок';
+            const giftIcon = gift?.icon || null;
+    
+            // Сохраняем в хранилище
+            const totalDonated = giftsStorage.addGift(userId, nickname, giftName, amount, giftIcon);
+            const giverId = 'giver_' + userId;
+            let giver = document.getElementById(giverId);
+    
+            if (!giver) {
+                giver = document.createElement('div');
+                giver.className = 'msg gift-message';
+                giver.id = giverId;
 
-            giver.innerHTML =
-                '<div class="content">' +
-                  '<div class="nick">' + nickname + '</div>' +
-                  '<div class="gift-list"></div>' +
-                '</div>';
+                const userGifts = giftsStorage.getUserGifts(userId);
+                const totalDonated = giftsStorage.getUserTotal(userId);
 
+                giver.innerHTML =
+                    '<div class="content">' +
+                      `<div class="nick">${nickname} <span class="total-count" style="margin-left:8px;color:#ffd700;font-weight:bold">(всего: ${totalDonated})</span></div>` +
+                      '<div class="gift-list"></div>' +
+                    '</div>';
+
+                logEl.appendChild(giver);
+
+                if (userGifts.length > 0) {
+                    const giftList = giver.querySelector('.gift-list');
+                    userGifts.forEach(giftItem => {
+                        const entry = {
+                            amount: giftItem.amount,
+                            el: document.createElement('div')
+                        };
+    
+                        entry.el.className = 'gift restored-gift';
+                        const iconHTML = giftItem.icon 
+                            ? `<img src="${giftItem.icon}" alt="${giftItem.name}" />`
+                            : '🎁';
+    
+                        entry.el.innerHTML =
+                            iconHTML +
+                            `<span class="gift-name">${giftItem.name}</span>` +
+                            ` ×<span class="gift-count">${giftItem.amount}</span>`;
+    
+                        giftList.appendChild(entry.el);
+                        getGiftMap(giver).set(giftItem.name, entry);
+                    });
+                }
+            } else {
+                // Обновляем общее количество
+                const totalSpan = giver.querySelector('.total-count');
+                if (totalSpan) {
+                    totalSpan.textContent = `(всего: ${totalDonated})`;
+                }
+            }
+            const giftList = giver.querySelector('.gift-list');
+            const gifts = getGiftMap(giver);
+            const giftKey = gift?.name || 'Подарок';
+            let entry = gifts.get(giftKey);
+            if (!entry) {
+                entry = {
+                    amount: giftsStorage.data.get(userId).gifts[giftKey].amount,
+                    el: document.createElement('div')
+                };
+
+                entry.el.className = 'gift';
+                entry.el.innerHTML =
+                    (gift?.icon
+                        ? '<img src="' + gift.icon + '" />'
+                        : '🎁') +
+                    '<span class="gift-name">' + giftKey + '</span>' +
+                    ' ×<span class="gift-count">' + amount + '</span>'; // ← сразу правильное количество!
+
+                giftList.appendChild(entry.el);
+                gifts.set(giftKey, entry);
+            } else {
+                // Только если элемент уже существовал, добавляем количество
+                entry.amount = giftsStorage.data.get(userId).gifts[giftKey].amount;
+                entry.el.querySelector('.gift-count').textContent = entry.amount;
+            }
+            // 🔥 визуальное усиление
+            entry.el.classList.remove('pulse');
+            void entry.el.offsetWidth;
+            entry.el.classList.add('pulse');
+
+            // 🌟 большие комбо
+            if (entry.amount >= 10) {
+              entry.el.classList.add('big');
+            }
+
+            // ⏱ комбо-таймер
+            const comboKey = giverId + giftKey;
+
+            // очищаем старый таймер
+            clearTimeout(giftCombos.get(comboKey));
+
+            // новый таймер, просто сбрасываем пульс и помечаем как завершённый
+            giftCombos.set(comboKey, setTimeout(() => {
+              // убираем пульс
+              entry.el.classList.remove('pulse');
+
+              // опционально добавляем класс для финальной подсветки
+              entry.el.classList.add('combo-done'); // CSS можно сделать золотой, увеличенный и т.д.
+
+              // НЕ удаляем элемент и не чистим Map
+              giftCombos.delete(comboKey);
+            }, 3000));
+
+            // 🔽 перемещаем зрителя вниз чата
             logEl.appendChild(giver);
+
+            scrollChatToBottom();
         }
 
-        const giftList = giver.querySelector('.gift-list');
-        const gifts = getGiftMap(giver);
+        if (d.event === 'share')
+          logMessage(d.platform, d.data.userId, d.data.nickname, 'Поделился трансляцией!', false, 'share');
 
-        const giftKey = gift?.name || 'Подарок';
-
-        let entry = gifts.get(giftKey);
-
-        if (!entry) {
-            entry = {
-                amount: 0,
-                el: document.createElement('div')
-            };
-
-            entry.el.className = 'gift';
-            entry.el.innerHTML =
-                (gift?.icon
-                    ? '<img src="' + gift.icon + '" />'
-                    : '🎁') +
-                '<span class="gift-name">' + giftKey + '</span>' +
-                ' ×<span class="gift-count">0</span>';
-
-            giftList.appendChild(entry.el);
-            gifts.set(giftKey, entry);
+        if (d.event === 'follow')
+          logMessage(d.platform, d.data.userId, d.data.nickname, 'Теперь подписчик', false, 'follow');
+      } catch (err) {
+          logMessage('system', 0, 'System', 'Ошибка парсинга сообщения', true);
+          console.error(err, e.data);
         }
+    };
+}
 
-        entry.amount += amount;
-        entry.el.querySelector('.gift-count').textContent = entry.amount;
-
-        // 🔽 перемещаем зрителя вниз чата
-        logEl.appendChild(giver);
-
-        scrollChatToBottom();
-    }
-
-    if (d.event === 'share')
-      logMessage(d.platform, d.data.userId, d.data.nickname, 'Поделился трансляцией!', false, 'share');
-
-    if (d.event === 'follow')
-      logMessage(d.platform, d.data.userId, d.data.nickname, 'Теперь подписчик', false, 'follow');
-  } catch (err) {
-      logMessage('system', 0, 'System', 'Ошибка парсинга сообщения', true);
-      console.error(err, e.data);
-    }
-};
+// Замените строку const ws = new WebSocket(...) на:
+document.addEventListener('DOMContentLoaded', () => {
+  updateCurrentTrack(); // Инициализация компактного режима при загрузке
+  connectWebSocket(); // ← вместо создания WS напрямую
+});
 
 // Инициализация YouTube API
 window.onYouTubeIframeAPIReady = function() {
@@ -842,11 +1199,6 @@ window.addEventListener('beforeunload', () => {
   if (player && player.destroy) {
     player.destroy();
   }
-});
-
-// Инициализация компактного режима при загрузке
-document.addEventListener('DOMContentLoaded', () => {
-  updateCurrentTrack();
 });
 </script>
 
