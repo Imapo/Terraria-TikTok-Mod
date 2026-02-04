@@ -627,8 +627,9 @@ let player;
 let progressInterval;
 let currentVideoDuration = 0;
 let ws;
-let wsReconnectInterval;
+let wsReconnectTimeout;
 let lastQueueUpdate = 0;
+let currentVideoId = null;
 
 giftsStorage.loadFromStorage();
 giftsStorage.migrateOldData();
@@ -647,30 +648,23 @@ function formatTime(seconds) {
 
 // Обновление прогресса
 function updateProgress() {
-  if (!player || !player.getCurrentTime) return;
-  
+  if (!player || !player.getCurrentTime || !player.getDuration) return;
+
   try {
     const currentTime = player.getCurrentTime();
     const duration = player.getDuration() || currentVideoDuration;
-    
-    if (duration > 0) {
-      const progressPercent = (currentTime / duration) * 100;
-      progressBarEl.style.width = `${progressPercent}%`;
-      
-      currentTimeEl.textContent = formatTime(currentTime);
-      totalTimeEl.textContent = formatTime(duration);
-      
-      // Оставшееся время
-      const remaining = duration - currentTime;
-      remainingTimeEl.textContent = `⏱️ Осталось: ${formatTime(remaining)}`;
-      
-      // Если осталось меньше 30 секунд - добавляем анимацию
-      if (remaining < 30) {
-        remainingTimeEl.classList.add('low-time');
-      } else {
-        remainingTimeEl.classList.remove('low-time');
-      }
-    }
+
+    if (!duration || duration < 2) return;
+
+    const percent = Math.min(100, (currentTime / duration) * 100);
+    progressBarEl.style.width = `${percent}%`;
+
+    currentTimeEl.textContent = formatTime(currentTime);
+    totalTimeEl.textContent = formatTime(duration);
+
+    const remaining = Math.max(0, duration - currentTime);
+    remainingTimeEl.textContent = `−${formatTime(remaining)}`;
+    remainingTimeEl.classList.toggle('low-time', remaining < 10);
   } catch (err) {
     console.log('Ошибка обновления прогресса:', err);
   }
@@ -678,13 +672,15 @@ function updateProgress() {
 
 // Начать обновление прогресса
 function startProgressUpdate() {
-  clearInterval(progressInterval);
+  if (progressInterval) return;
   progressInterval = setInterval(updateProgress, 1000);
 }
 
 // Остановить обновление прогресса
-function stopProgressUpdate() {
+function stopProgressUpdate(resetUI = true) {
   clearInterval(progressInterval);
+  progressInterval = null;
+  if (!resetUI) return;
   progressBarEl.style.width = '0%';
   currentTimeEl.textContent = '0:00';
   totalTimeEl.textContent = '0:00';
@@ -806,9 +802,9 @@ function updateNicknameEverywhere(userId, newNick) {
 
 function scrollChatToBottom() {
   // Ждем следующего цикла рендеринга
-  setTimeout(() => {
-    logEl.scrollTop = logEl.scrollHeight;
-  }, 1000);
+  requestAnimationFrame(() => {
+      logEl.scrollTop = logEl.scrollHeight;
+    });
 }
 
 // В функции logMessage добавьте вызов автоскролла
@@ -851,6 +847,8 @@ function logMessage(platform, userId, nickname, text, isError = false, extraClas
 }
 
 function play(videoId) {
+  if (videoId === currentVideoId) return;
+  currentVideoId = videoId;
   if (!videoId || videoId.trim() === '') {
     console.warn('Пустой videoId');
     return;
@@ -881,17 +879,21 @@ function play(videoId) {
           event.target.playVideo();
           currentVideoDuration = event.target.getDuration();
           updateProgress();
-          startProgressUpdate();
         },
         onStateChange: (event) => {
-          if (event.data === YT.PlayerState.ENDED) {
-            stopProgressUpdate();
-            ws.send(JSON.stringify({ event: 'trackEnded' }));
-          } else if (event.data === YT.PlayerState.PLAYING) {
-            currentVideoDuration = player.getDuration();
-            startProgressUpdate();
-          } else if (event.data === YT.PlayerState.PAUSED) {
-            clearInterval(progressInterval);
+          switch (event.data) {
+            case YT.PlayerState.ENDED:
+              stopProgressUpdate(false);
+              break;
+
+            case YT.PlayerState.PLAYING:
+              currentVideoDuration = player.getDuration() || currentVideoDuration;
+              startProgressUpdate();
+              break;
+
+            case YT.PlayerState.PAUSED:
+            stopProgressUpdate(false);
+            break;
           }
         },
         onError: (event) => {
@@ -902,7 +904,7 @@ function play(videoId) {
     });
   } else {
     // Останавливаем старый интервал
-    stopProgressUpdate();
+    stopProgressUpdate(false);
     
     // Загружаем новое видео
     const tryPlay = () => {
@@ -934,14 +936,14 @@ function connectWebSocket() {
   ws = new WebSocket("ws://127.0.0.1:21214");
   
   ws.onopen = () => {
-    console.log('✅ WebSocket подключен');
-    clearInterval(wsReconnectInterval);
-  };
-  
-  ws.onclose = () => {
-    console.log('⚠ WebSocket отключен, переподключение через 5 секунд...');
-    wsReconnectInterval = setTimeout(connectWebSocket, 5000);
-  };
+      console.log('✅ WebSocket подключен');
+      clearTimeout(wsReconnectTimeout);
+    };
+
+    ws.onclose = () => {
+      console.log('⚠ WebSocket отключен, переподключение через 5 секунд...');
+      wsReconnectTimeout = setTimeout(connectWebSocket, 5000);
+    };
   
   ws.onerror = (error) => {
     console.error('❌ Ошибка WebSocket:', error);
@@ -979,13 +981,11 @@ function connectWebSocket() {
                 title: d.data.title || 'Unknown',
                 requester: d.data.requester || 'Неизвестно'
             };
-            updateCurrentTrack();
-            displayQueue();
-    
+            updateCurrentTrack();    
             if (d.data.videoId && d.data.videoId.trim() !== '') {
                 play(d.data.videoId);
             } else {
-                stopProgressUpdate();
+                stopProgressUpdate(false);
                 if (player && player.stopVideo) {
                     player.stopVideo();
                 }
@@ -999,17 +999,11 @@ function connectWebSocket() {
         }
 
         if(d.event === 'trackEnded') {
-          if(songQueueDisplay.list.length > 0) {
-            songQueueDisplay.current = songQueueDisplay.list.shift();
-          } else {
-            songQueueDisplay.current = null;
-          }
-          updateCurrentTrack();
-          displayQueue();
-          stopProgressUpdate();
+          stopProgressUpdate(false);
         }
 
         if(d.event === 'music_stop') {
+          currentVideoId = null;
           songQueueDisplay.current = null;
           songQueueDisplay.list = [];
           updateCurrentTrack();
