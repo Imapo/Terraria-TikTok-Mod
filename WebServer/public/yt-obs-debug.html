@@ -354,6 +354,45 @@ body {
   color: #ffd700;
   transition: transform 0.3s ease, color 0.3s ease;
 }
+/* ===== Стили для премодерации ===== */
+.msg.moderation-pending {
+  border-left: 5px solid #FFA500; /* оранжевый для ожидания */
+  background: rgba(60, 40, 20, 0.8);
+}
+
+.msg.moderation-approved {
+  border-left: 5px solid #00FF00; /* зелёный для одобренных */
+  background: rgba(20, 40, 20, 0.8);
+  /* Простая плавная смена цвета без transform */
+  transition: background-color 0.3s ease, border-left-color 0.3s ease;
+}
+
+@keyframes approved-fade {
+  0% { opacity: 0.7; transform: translateX(-10px); }
+  100% { opacity: 1; transform: translateX(0); }
+}
+
+.msg.moderation-rejected {
+  border-left: 5px solid #FF0000; /* красный для отклонённых */
+  background: rgba(40, 20, 20, 0.8);
+  /* Простая плавная смена цвета без transform */
+  transition: background-color 0.3s ease, border-left-color 0.3s ease;
+}
+
+@keyframes rejected-fade {
+  0% { opacity: 0.7; transform: translateX(-10px); }
+  100% { opacity: 1; transform: translateX(0); }
+}
+
+/* Иконки статусов */
+.status-icon {
+  display: inline-block;
+  width: 24px;
+  height: 24px;
+  vertical-align: baseline;
+  font-size: 20px;
+  font-weight: bold;
+}
 </style>
 </head>
 
@@ -807,8 +846,8 @@ function scrollChatToBottom() {
     });
 }
 
-// В функции logMessage добавьте вызов автоскролла
-function logMessage(platform, userId, nickname, text, isError = false, extraClass = '', time = '') {
+// В функции logMessage добавляем поддержку messageId для последующего редактирования
+function logMessage(platform, userId, nickname, text, isError = false, extraClass = '', time = '', messageId = null) {
   const DISABLE_ANIMATIONS_THRESHOLD = 30;
   if (logEl.children.length > DISABLE_ANIMATIONS_THRESHOLD) {
     document.documentElement.style.setProperty('--blur', 'none');
@@ -817,6 +856,11 @@ function logMessage(platform, userId, nickname, text, isError = false, extraClas
   const el = document.createElement('div');
   el.className = `msg ${platform} ${isError ? 'error' : ''} ${isSystem ? 'system' : ''} ${extraClass}`;
   el.dataset.userId = userId;
+  
+  // Сохраняем messageId для последующего редактирования
+  if (messageId) {
+    el.dataset.messageId = messageId;
+  }
 
   el.innerHTML = `
   ${icons[platform] || ''}
@@ -833,17 +877,55 @@ function logMessage(platform, userId, nickname, text, isError = false, extraClas
 
   // Ограничиваем количество сообщений в чате
   if (logEl.children.length > MAX_CHAT_MESSAGES) {
-    // Удаляем сразу несколько старых сообщений
     const toRemove = logEl.children.length - MAX_CHAT_MESSAGES;
     for (let i = 0; i < toRemove; i++) {
-    if (logEl.firstChild) {
+      if (logEl.firstChild) {
         logEl.removeChild(logEl.firstChild);
+      }
     }
-   }
-}
+  }
 
   // Автоскролл к новому сообщению
   scrollChatToBottom();
+  
+  return el; // Возвращаем элемент для возможного редактирования
+}
+
+// Новая функция для обновления существующего сообщения
+function updateMessage(messageId, newText, extraClass = '', status = null) {
+  // Находим сообщение по data-message-id
+  const messageEl = document.querySelector(`[data-message-id="${messageId}"]`);
+  
+  if (!messageEl) {
+    console.warn('Сообщение для обновления не найдено:', messageId);
+    return;
+  }
+  
+  // Обновляем классы - удаляем старые классы модерации и добавляем новый
+  if (extraClass) {
+    messageEl.classList.remove('moderation-pending', 'moderation-approved', 'moderation-rejected');
+    messageEl.classList.add(extraClass);
+  }
+  
+  // Обновляем текст сообщения
+  const textEl = messageEl.querySelector('.text');
+  if (textEl) {
+    // Добавляем иконку статуса в зависимости от типа
+    if (status === 'approved') {
+      textEl.innerHTML = `<span class="status-icon" style="color: #00FF00;">✅</span> ${newText}`;
+    } else if (status === 'rejected') {
+      textEl.innerHTML = `<span class="status-icon" style="color: #FF0000;">❌</span> ${newText}`;
+    } else {
+      textEl.textContent = newText;
+    }
+  }
+  
+  // Принудительно перезапускаем анимацию для визуального эффекта
+  messageEl.style.animation = 'none';
+  setTimeout(() => {
+    messageEl.offsetHeight; // trigger reflow
+    messageEl.style.animation = null;
+  }, 10);
 }
 
 function play(videoId) {
@@ -884,6 +966,11 @@ function play(videoId) {
           switch (event.data) {
             case YT.PlayerState.ENDED:
               stopProgressUpdate(false);
+              if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                  event: 'trackEnded'
+                }));
+              }
               break;
 
             case YT.PlayerState.PLAYING:
@@ -956,22 +1043,34 @@ function connectWebSocket() {
 
         // ===== CHAT HISTORY =====
         if (d.event === 'chatHistory' && Array.isArray(d.data)) {
-          logEl.innerHTML = '';
+            logEl.innerHTML = '';
 
-          d.data.forEach(msg => {
-              logMessage(
-                msg.platform,
-                msg.userId,
-                msg.nickname,
-                msg.text,
-                false,
-                msg.extraClass || '',
-                msg.time // ⏱
-              );
+            d.data.forEach(msg => {
+                logMessage(
+                    msg.platform,
+                    msg.userId,
+                    msg.nickname,
+                    msg.text,
+                    false,
+                    msg.extraClass || '',
+                    msg.time,
+                    msg.messageId // ← добавляем messageId
+                );
             });
 
-          scrollChatToBottom();
-          return; // ВАЖНО: дальше не обрабатываем
+            scrollChatToBottom();
+            return;
+        }
+
+        // ===== НОВОЕ СОБЫТИЕ: обновление сообщения =====
+        if (d.event === 'chat.update') {
+            updateMessage(
+                d.messageId,
+                d.text,
+                d.extraClass || '',
+                d.status || null
+            );
+            return;
         }
 
         if(d.event === 'music') {
@@ -1044,8 +1143,9 @@ function connectWebSocket() {
             d.data.nickname,
             d.data.text,
             false,
-            '',
-            d.data.time // ⏱
+            d.data.extraClass || '',   // ← ДОБАВЛЕНО!
+            d.data.time || '',         // ← на случай undefined
+            d.data.messageId || null   // ← ДОБАВЛЕНО!
           );
         }
 
