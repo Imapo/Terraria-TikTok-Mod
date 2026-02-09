@@ -102,6 +102,9 @@ class GlobalState {
         this.streamStartTs = null;
         this.telegramVIPs = new Set();
         this.loadVIPs();
+        // Глобальная очередь модерации для всех платформ
+        this.moderationQueue = new Map(); // ID -> { user, userId, song, isVIP, timestamp, platformName, messageId }
+        this.moderationIdCounter = 0;
     }
 
     loadVIPs() {
@@ -329,6 +332,31 @@ class Platform {
         this.eventEmitter = eventEmitter;
         this.isConnected = false;
         this.retryManager = new RetryManager();
+        
+        // Счётчик для уникальных ID сообщений
+        this.messageIdCounter = 0;
+        
+        // Запускаем очистку старых заявок
+        this.startModerationCleanup();
+    }
+    
+    // Генерация уникального ID сообщения
+    generateMessageId() {
+        return `${this.name}_${Date.now()}_${this.messageIdCounter++}`;
+    }
+    
+    startModerationCleanup() {
+        setInterval(() => {
+            const now = Date.now();
+            const maxAge = 30 * 60 * 1000; // 30 минут
+            
+            for (const [id, request] of this.globalState.moderationQueue.entries()) {
+                if (now - request.timestamp > maxAge) {
+                    this.globalState.moderationQueue.delete(id);
+                    this.sendMessageToChat(`⏰ Заявка #${id} удалена (время вышло)`);
+                }
+            }
+        }, 60 * 1000);
     }
 
     async connect() {
@@ -363,9 +391,153 @@ class Platform {
         });
     }
 
-    async handleSongRequest({ user, userId, text, cooldownMs, isVIP = false }) {
+    // Абстрактный метод для проверки прав модератора/стримера
+    isUserModeratorOrBroadcaster(userData) {
+        throw new Error('isUserModeratorOrBroadcaster must be implemented by subclass');
+    }
+
+    // Обработка команд премодерации (!yes ID, !no ID, !modqueue)
+    async handleModerationCommand({ user, userId, text, userData }) {
+        const trimmed = text.trim();
+        
+        if (trimmed === '!modqueue') {
+            if (!this.isUserModeratorOrBroadcaster(userData)) {
+                this.sendMessageToChat(`❌ ${user}, только модераторы и стример могут видеть очередь модерации!`);
+                return;
+            }
+            this.showModerationQueue();
+            return;
+        }
+        
+        if (trimmed.startsWith('!yes ') || trimmed.startsWith('!no ')) {
+            if (!this.isUserModeratorOrBroadcaster(userData)) {
+                this.sendMessageToChat(`❌ ${user}, только модераторы и стример могут одобрять треки!`);
+                return;
+            }
+            
+            const parts = trimmed.split(/\s+/);
+            const command = parts[0];
+            const idStr = parts[1];
+            
+            const id = parseInt(idStr, 10);
+            if (isNaN(id) || id < 0) {
+                this.sendMessageToChat(`❌ Неверный формат: используйте "!yes {ID}" или "!no {ID}"`);
+                return;
+            }
+            
+            const request = this.globalState.moderationQueue.get(id);
+            if (!request) {
+                this.sendMessageToChat(`❌ Заявка #${id} не найдена. Проверьте !modqueue`);
+                return;
+            }
+            
+            if (command === '!yes') {
+                await this.approveSongRequest(id, request, user);
+            } else if (command === '!no') {
+                await this.rejectSongRequest(id, request, user);
+            }
+            return;
+        }
+    }
+
+    // Показать очередь модерации
+    showModerationQueue() {
+        if (this.globalState.moderationQueue.size === 0) {
+            this.sendMessageToChat(`📭 Очередь модерации пуста`);
+            return;
+        }
+        
+        const requests = Array.from(this.globalState.moderationQueue.values());
+        let message = `📋 Очередь модерации (${requests.length}):\n`;
+        
+        for (const request of requests.slice(0, 10)) {
+            const age = Math.floor((Date.now() - request.timestamp) / 60000);
+            message += `#${request.id}: ${request.user} (${request.platformName}) — "${request.song.title}" (${age} мин)\n`;
+        }
+        
+        if (requests.length > 10) {
+            message += `...и ещё ${requests.length - 10} заявок`;
+        }
+        
+        this.sendMessageToChat(message);
+    }
+
+    // Одобрить трек - РЕДАКТИРУЕМ сообщение вместо создания новых
+    async approveSongRequest(id, request, moderator) {
+        try {
+            const { user, userId, song, isVIP, platformName, messageId } = request;
+            
+            // Обновляем время последнего запроса пользователя
+            const now = Date.now();
+            this.globalState.songQueue.lastRequest.set(`${platformName}:${userId}`, now);
+            
+            // Добавляем трек в очередь
+            this.globalState.songQueue.add(song, isVIP);
+            
+            // === РЕДАКТИРУЕМ сообщение с заявкой ===
+            if (messageId) {
+                this.eventEmitter.emit('chat.update', {
+                    messageId: messageId,
+                    platform: platformName,
+                    text: `Одобрено ${moderator}: ${song.author} — ${song.title}`,
+                    status: 'approved',
+                    extraClass: 'moderation-approved'
+                });
+            }
+            // =====================================
+            
+            // Удаляем из очереди модерации
+            this.globalState.moderationQueue.delete(id);
+            
+            // Запускаем воспроизведение, если очередь пуста
+            if (!this.globalState.songQueue.current && !this.globalState.songQueue.isEmpty()) {
+                const nextSong = this.globalState.songQueue.next();
+                if (nextSong) {
+                    this.eventEmitter.emit('music.play', nextSong);
+                }
+            }
+            
+            this.eventEmitter.emit('queue.update');
+            
+        } catch (error) {
+            console.error('Error approving song request:', error);
+            this.sendMessageToChat(`❌ Ошибка при одобрении заявки #${id}`);
+        }
+    }
+
+    // Отклонить трек - РЕДАКТИРУЕМ сообщение вместо создания новых
+    async rejectSongRequest(id, request, moderator) {
+        try {
+            const { song, messageId, platformName } = request;
+            
+            // === РЕДАКТИРУЕМ сообщение с заявкой ===
+            if (messageId) {
+                this.eventEmitter.emit('chat.update', {
+                    messageId: messageId,
+                    platform: platformName,
+                    text: `Отклонено ${moderator}: ${song.author} — ${song.title}`,
+                    status: 'rejected',
+                    extraClass: 'moderation-rejected'
+                });
+            }
+            // =====================================
+            
+            // Удаляем из очереди модерации
+            this.globalState.moderationQueue.delete(id);
+            
+        } catch (error) {
+            console.error('Error rejecting song request:', error);
+            this.sendMessageToChat(`❌ Ошибка при отклонении заявки #${id}`);
+        }
+    }
+
+    // Модифицированный handleSongRequest с поддержкой премодерации
+    async handleSongRequest({ user, userId, text, cooldownMs, isVIP = false, bypassModeration = false }) {
         const query = text.slice(6).trim();
-        if (!query) return;
+        if (!query) {
+            this.sendMessageToChat(`❌ ${user}, укажите название трека после !song`);
+            return;
+        }
 
         const last = this.globalState.songQueue.lastRequest.get(`${this.name}:${user}`) || 0;
         const now = Date.now();
@@ -387,15 +559,23 @@ class Platform {
                 const r = await yts({ query });
                 foundVideo = r.videos?.[0];
             }
-        } catch {
+        } catch (error) {
+            console.error('Error searching song:', error);
+            this.sendMessageToChat(`❌ ${user}, ошибка при поиске трека`);
             return;
         }
 
-        if (!foundVideo) return;
-        if (foundVideo.seconds > 10 * 60) return;
+        if (!foundVideo) {
+            this.sendMessageToChat(`❌ ${user}, трек не найден`);
+            return;
+        }
+        
+        if (foundVideo.seconds > 10 * 60) {
+            this.sendMessageToChat(`❌ ${user}, трек слишком длинный (максимум 10 минут)`);
+            return;
+        }
 
-        this.globalState.songQueue.lastRequest.set(`${this.name}:${user}`, now);
-
+        // Создаём объект трека
         const song = {
             requesterId: `${this.name}:${userId}`,
             requester: user,
@@ -405,36 +585,77 @@ class Platform {
             duration: foundVideo.seconds || 0
         };
 
-        this.globalState.songQueue.add(song, isVIP);
-        this.sendMessageToChat(`🎵 Добавлено: ${song.author} — ${song.title}`);
+        // Если пользователь может пропустить премодерацию (стример/мод)
+        if (bypassModeration) {
+            this.globalState.songQueue.lastRequest.set(`${this.name}:${user}`, now);
+            this.globalState.songQueue.add(song, isVIP);
+            this.sendMessageToChat(`🎵 Добавлено: ${song.author} — ${song.title} (пропущена модерация)`);
 
-        if (!this.globalState.songQueue.current && !this.globalState.songQueue.isEmpty()) {
-            const nextSong = this.globalState.songQueue.next();
-            if (nextSong) {
-                this.eventEmitter.emit('music.play', nextSong);
+            if (!this.globalState.songQueue.current && !this.globalState.songQueue.isEmpty()) {
+                const nextSong = this.globalState.songQueue.next();
+                if (nextSong) {
+                    this.eventEmitter.emit('music.play', nextSong);
+                }
             }
+
+            this.eventEmitter.emit('queue.update');
+            return;
         }
 
-        this.eventEmitter.emit('queue.update');
-    }
-
-    sendMessageToChat(message) {
+        // Добавляем в очередь премодерации
+        const moderationId = this.globalState.moderationIdCounter++;
+        const messageId = this.generateMessageId(); // Генерируем уникальный ID
+        
+        const request = {
+            id: moderationId,
+            user,
+            userId,
+            song,
+            isVIP,
+            timestamp: Date.now(),
+            platformName: this.name,
+            messageId: messageId // Сохраняем ID для последующего редактирования
+        };
+        
+        this.globalState.moderationQueue.set(moderationId, request);
+        
+        // === Отправляем сообщение с уникальным ID и классом для модерации ===
         this.eventEmitter.emit('chat', {
             platform: this.name,
             userId: 'system',
             nickname: this.name,
-            text: message
+            text: `📝 ${user}: "${song.title}" — ${song.author} отправлен на модерацию. [ID: #${moderationId}]`,
+            messageId: messageId,
+            extraClass: 'moderation-pending'
+        });
+        // =====================================================================
+    }
+
+    // Обновлённый sendMessageToChat с поддержкой messageId
+    sendMessageToChat(message, extraClass = '') {
+        const messageId = this.generateMessageId();
+        this.eventEmitter.emit('chat', {
+            platform: this.name,
+            userId: 'system',
+            nickname: this.name,
+            text: message,
+            messageId: messageId,
+            extraClass: extraClass
         });
     }
 
-    emitChat(userId, nickname, text) {
+    // Обновлённый emitChat с поддержкой messageId
+    emitChat(userId, nickname, text, extraClass = '') {
+        const messageId = this.generateMessageId();
         this.eventEmitter.emit('chat', {
             platform: this.name,
             userId,
             nickname,
             text,
             timestamp: Date.now(),
-            time: Utils.formatTimeHHMMSS()
+            time: Utils.formatTimeHHMMSS(),
+            messageId: messageId,
+            extraClass: extraClass
         });
     }
 
@@ -501,6 +722,21 @@ class TikTokService extends Platform {
             const isSubscriber = identity.isSubscriberOfAnchor || false;
             const isFollower = Boolean(identity.isFollower);
 
+            if (text.startsWith('!yes ') || text.startsWith('!no ') || text === '!modqueue') {
+                if (!this.isUserModeratorOrBroadcaster(identity)) {
+                    this.sendMessageToChat(`❌ ${user}, только модераторы и стример могут управлять модерацией!`);
+                    return;
+                }
+        
+                this.handleModerationCommand({
+                    user,
+                    userId,
+                    text,
+                    userData: identity
+                });
+                return;
+            }
+
             // Commands
             if (text.startsWith('!song ')) {
                 const cooldownMs = Utils.getTikTokCooldown(userId, {
@@ -509,11 +745,13 @@ class TikTokService extends Platform {
                     isSubscriber,
                     isFollower
                 });
+                const bypassModeration = this.isUserModeratorOrBroadcaster(identity);
                 this.handleSongRequest({
                     user,
                     userId,
                     text,
-                    cooldownMs
+                    cooldownMs,
+                    bypassModeration
                 });
                 return;
             }
@@ -696,6 +934,12 @@ class TikTokService extends Platform {
             }
         }
     }
+
+    isUserModeratorOrBroadcaster(identity) {
+        const isAnchor = identity.isAnchor || false;
+        const isMod = identity.isModeratorOfAnchor || isAnchor;
+        return isMod || isAnchor;
+    }
 }
 
 /* =======================
@@ -708,6 +952,10 @@ class TwitchService extends Platform {
         this.client = null;
         this.announcer = null;
         this.twitchSeen = new Set();
+    }
+
+    isUserModeratorOrBroadcaster(tags) {
+        return Utils.canSkipOrStop(tags, STREAMER);
     }
 
     async _connect() {
@@ -748,6 +996,17 @@ class TwitchService extends Platform {
             const user = tags.username;
             const text = msg.trim();
 
+            // Сначала обрабатываем команды премодерации
+            if (text.startsWith('!yes ') || text.startsWith('!no ') || text === '!modqueue') {
+                await this.handleModerationCommand({
+                    user,
+                    userId: tags['user-id'],
+                    text,
+                    userData: tags
+                });
+                return;
+            }
+
             // Commands
             if (text.startsWith('!song ')) {
                 const cooldownMs = Utils.getUnifiedCooldown({
@@ -756,12 +1015,14 @@ class TwitchService extends Platform {
                     isSubscriber: Utils.isSubscriber(tags),
                     isFollower: false
                 });
+                const bypassModeration = this.isUserModeratorOrBroadcaster(tags);
                 await this.handleSongRequest({
                     user,
                     userId: tags['user-id'],
                     text,
                     cooldownMs,
-                    isVIP: Utils.isVIP(tags)
+                    isVIP: Utils.isVIP(tags),
+                    bypassModeration
                 });
                 return;
             }
@@ -996,6 +1257,22 @@ class YouTubeService extends Platform {
 
         const { isAnchor, isMod, isSubscriber } = Utils.getYouTubeRoles(chatItem);
 
+        // Команды премодерации
+        if (messageText.startsWith('!yes ') || messageText.startsWith('!no ') || messageText === '!modqueue') {
+            if (!this.isUserModeratorOrBroadcaster(chatItem)) {
+                this.sendMessageToChat(`❌ ${username}, только модераторы и стример могут управлять модерацией!`);
+                return;
+            }
+    
+            this.handleModerationCommand({
+                user: username,
+                userId,
+                text: messageText,
+                userData: chatItem
+            });
+            return;
+        }
+
         // Commands
         if (messageText.startsWith('!song ')) {
             const cooldownMs = Utils.getUnifiedCooldown({
@@ -1004,11 +1281,14 @@ class YouTubeService extends Platform {
                 isSubscriber,
                 isFollower: false
             });
+            // Проверяем, может ли пользователь пропустить премодерацию
+            const bypassModeration = this.isUserModeratorOrBroadcaster(chatItem);
             this.handleSongRequest({
                 user: username,
                 userId,
                 text: messageText,
-                cooldownMs
+                cooldownMs,
+                bypassModeration
             });
             return;
         }
@@ -1093,6 +1373,12 @@ class YouTubeService extends Platform {
             }
         }
     }
+
+    // Проверка прав модератора/стримера для YouTube
+    isUserModeratorOrBroadcaster(chatItem) {
+        const { isAnchor, isMod } = Utils.getYouTubeRoles(chatItem);
+        return isAnchor || isMod;
+    }
 }
 
 /* =======================
@@ -1108,7 +1394,8 @@ class TelegramService extends Platform {
             '/skip': '!skip',
             '/queue': '!queue',
             '/pause': '!pause',
-            '/play': '!play'
+            '/play': '!play',
+            '/stop': '!stop'  // ← ДОБАВЛЕНО
         };
     }
 
@@ -1142,7 +1429,6 @@ class TelegramService extends Platform {
 
     async handleMessage(msg) {
         if (!msg.text) return;
-        
         const chatId = msg.chat.id;
         const fromId = msg.from.id;
         const userId = fromId;
@@ -1150,20 +1436,48 @@ class TelegramService extends Platform {
         const lastName = msg.from.last_name || '';
         const username = msg.from.username ? `@${msg.from.username}` : '';
         const user = `${firstName}${lastName ? ' ' + lastName : ''}${username ? ' (' + username + ')' : ''}`;
-        let text = msg.text.trim();
-        const role = await this.getTelegramRole(msg);
+        let originalText = msg.text.trim();
 
-        // VIP commands
-        if (role === 'broadcaster' || role === 'moderator') {
-            await this.handleVIPCommands(text, chatId, fromId);
-        }
+        // === ОТЛАДОЧНОЕ ЛОГИРОВАНИЕ ===
+        console.log('📥 Telegram message debug:', {
+            chatId: chatId,
+            fromId: fromId,
+            user: user,
+            text: originalText,
+            chatType: msg.chat.type,
+            isPrivate: msg.chat.type === 'private',
+            ownerId: OWNER_ID,
+            isOwner: msg.chat.type === 'private' && fromId === OWNER_ID
+        });
+        // ============================
+    
+        // ОПРЕДЕЛЯЕМ РОЛЬ ДО ВСЕГО
+        const role = await this.getTelegramRole(msg);
+        const isModeratorOrBroadcaster = this.isUserModeratorOrBroadcaster(role);
 
         // Convert commands
+        let text = originalText;
         for (const tgCmd in this.TELEGRAM_COMMAND_MAP) {
             if (text === tgCmd || text.startsWith(tgCmd + ' ')) {
                 text = text.replace(tgCmd, this.TELEGRAM_COMMAND_MAP[tgCmd]);
                 break;
             }
+        }
+
+        // Команды премодерации - доступны только модераторам/стримеру
+        if (text.startsWith('!yes ') || text.startsWith('!no ') || text === '!modqueue') {
+            if (!isModeratorOrBroadcaster) {
+                await this.bot.sendMessage(chatId, `❌ Только модераторы и стример могут управлять модерацией!`);
+                return;
+            }
+        
+            await this.handleModerationCommand({
+                user: msg.from.username || msg.from.first_name,
+                userId: fromId,
+                text: text,
+                userData: role
+            });
+            return;
         }
 
         // Commands
@@ -1174,17 +1488,22 @@ class TelegramService extends Platform {
                 isSubscriber: false,
                 isFollower: false
             });
-            
+        
+            // ИСПОЛЬЗУЕМ СОХРАНЁННУЮ РОЛЬ
+            const bypassModeration = isModeratorOrBroadcaster;
+        
             await this.handleSongRequest({
                 user: msg.from.username || msg.from.first_name,
                 userId: fromId,
-                text,
-                cooldownMs,
-                isVIP: this.globalState.isVIPTelegram(fromId)
+                text: text,
+                cooldownMs: cooldownMs,
+                isVIP: this.globalState.isVIPTelegram(fromId),
+                bypassModeration: bypassModeration
             });
             return;
         }
 
+        // ... остальные команды остаются без изменений ...
         if (text === '!skip') {
             const allowed = Utils.canUserSkipCurrentSong(
                 this.globalState.songQueue,
@@ -1203,14 +1522,29 @@ class TelegramService extends Platform {
 
             this.globalState.songQueue.current = null;
             const next = this.globalState.songQueue.next();
-            
+        
             if (next) {
                 this.eventEmitter.emit('music.play', next);
             } else {
                 this.eventEmitter.emit('music.stop');
             }
-            
+        
             this.eventEmitter.emit('queue.update');
+            return;
+        }
+
+        if (text === '!stop') {
+            if (role === 'user') {
+                await this.bot.sendMessage(chatId, '⛔ Недостаточно прав');
+                return;
+            }
+
+            this.globalState.songQueue.clearCurrent();
+            this.globalState.songQueue.queue = [];
+            this.globalState.songQueue.lastRequest.clear();
+            this.eventEmitter.emit('music.stop');
+            this.eventEmitter.emit('queue.update');
+            await this.bot.sendMessage(chatId, `⏹ Воспроизведение остановлено, очередь очищена`);
             return;
         }
 
@@ -1241,8 +1575,26 @@ class TelegramService extends Platform {
         );
     }
 
+    // Переопределяем sendMessageToChat для Telegram
+    sendMessageToChat(message) {
+        // Для Telegram мы не можем отправить сообщение без chatId
+        // Поэтому эмитим событие в мультичат, но не отправляем в Telegram
+        this.eventEmitter.emit('chat', {
+            platform: this.name,
+            userId: 'system',
+            nickname: this.name,
+            text: message,
+            messageId: this.generateMessageId()
+        });
+    }
+
     async getTelegramRole(msg) {
         if (msg.chat.type === 'private' && msg.from.id === OWNER_ID) {
+            return 'broadcaster';
+        }
+
+        if ((msg.chat.type === 'supergroup' || msg.chat.type === 'group') && 
+            Math.abs(OWNER_ID) === Math.abs(msg.chat.id)) {
             return 'broadcaster';
         }
 
@@ -1264,6 +1616,8 @@ class TelegramService extends Platform {
                 this.globalState.telegramVIPs.add(targetId);
                 this.globalState.saveVIPs();
                 await this.bot.sendMessage(chatId, `✅ Пользователь ${targetId} теперь VIP!`);
+                // Также отправляем в мультичат
+                this.sendMessageToChat(`✅ TG VIP добавлен: ${targetId}`);
             } else {
                 await this.bot.sendMessage(chatId, `❌ Неверный ID`);
             }
@@ -1276,6 +1630,7 @@ class TelegramService extends Platform {
                 this.globalState.telegramVIPs.delete(targetId);
                 this.globalState.saveVIPs();
                 await this.bot.sendMessage(chatId, `❌ Пользователь ${targetId} больше не VIP`);
+                this.sendMessageToChat(`❌ TG VIP удалён: ${targetId}`);
             } else {
                 await this.bot.sendMessage(chatId, `❌ Пользователь не найден в VIP`);
             }
@@ -1309,60 +1664,9 @@ class TelegramService extends Platform {
         }
     }
 
-    async handleSongRequest({ user, userId, text, cooldownMs, isVIP }) {
-        const query = text.slice(6).trim();
-        if (!query) return;
-
-        const last = this.globalState.songQueue.lastRequest.get(`${this.name}:${user}`) || 0;
-        const now = Date.now();
-
-        if (cooldownMs > 0 && now - last < cooldownMs) {
-            const remainingMs = cooldownMs - (now - last);
-            // We need chatId to reply, but we don't have it here
-            // This is a limitation of the current design
-            return;
-        }
-
-        let foundVideo;
-        const videoId = Utils.extractYouTubeID(query);
-
-        try {
-            if (videoId) {
-                const r = await yts({ videoId });
-                foundVideo = r.video || r;
-            } else {
-                const r = await yts({ query });
-                foundVideo = r.videos?.[0];
-            }
-        } catch {
-            return;
-        }
-
-        if (!foundVideo) return;
-        if (foundVideo.seconds > 10 * 60) return;
-
-        this.globalState.songQueue.lastRequest.set(`${this.name}:${user}`, now);
-
-        const song = {
-            requesterId: `${this.name}:${userId}`,
-            requester: user,
-            title: foundVideo.title,
-            videoId: foundVideo.videoId,
-            author: foundVideo.author?.name || 'Unknown',
-            duration: foundVideo.seconds || 0
-        };
-
-        this.globalState.songQueue.add(song, isVIP);
-        this.sendMessageToChat(`🎵 Добавлено: ${song.author} — ${song.title}`);
-
-        if (!this.globalState.songQueue.current && !this.globalState.songQueue.isEmpty()) {
-            const nextSong = this.globalState.songQueue.next();
-            if (nextSong) {
-                this.eventEmitter.emit('music.play', nextSong);
-            }
-        }
-
-        this.eventEmitter.emit('queue.update');
+    // Проверка прав модератора/стримера для Telegram
+    isUserModeratorOrBroadcaster(role) {
+        return role === 'broadcaster' || role === 'moderator';
     }
 }
 
@@ -1397,7 +1701,7 @@ class DiscordService extends Platform {
                         process.env.DISCORD_CHANNEL_ID
                     );
                     this.chatChannel = await this.client.channels.fetch(
-                        process.env.DISCORD_CHAT_CHANNEL_ID
+                        process.env.DISCORD_LIVE_CHAT
                     );
                     this.setupEventListeners();
                     this.isConnected = true;
@@ -1426,13 +1730,141 @@ class DiscordService extends Platform {
         this.client.on('messageCreate', async (msg) => {
             if (msg.author.bot) return;
             if (!this.chatChannel || msg.channel.id !== this.chatChannel.id) return;
-            
+        
             const text = msg.content?.trim();
             if (!text) return;
-            
+        
             const userId = msg.author.id;
             const username = msg.author.username;
+        
+            // Получаем участника сервера для проверки прав
+            const member = await msg.guild.members.fetch(userId).catch(() => null);
+        
+            // Команды премодерации
+            if (text.startsWith('!yes ') || text.startsWith('!no ') || text === '!modqueue') {
+                if (!this.isUserModeratorOrBroadcaster(member)) {
+                    await msg.reply(`❌ Только модераторы и владелец сервера могут управлять модерацией!`);
+                    return;
+                }
             
+                await this.handleModerationCommand({
+                    user: username,
+                    userId: userId,
+                    text: text,
+                    userData: member
+                });
+                return;
+            }
+
+            // Commands
+            if (text.startsWith('!song ')) {
+                const cooldownMs = Utils.getUnifiedCooldown({
+                    isAnchor: member?.id === msg.guild.ownerId,
+                    isMod: this.isUserModeratorOrBroadcaster(member),
+                    isSubscriber: false,
+                    isFollower: false
+                });
+            
+                const bypassModeration = this.isUserModeratorOrBroadcaster(member);
+            
+                await this.handleSongRequest({
+                    user: username,
+                    userId: userId,
+                    text: text,
+                    cooldownMs: cooldownMs,
+                    bypassModeration: bypassModeration
+                });
+                return;
+            }
+
+            if (text === '!skip') {
+                const allowed = Utils.canUserSkipCurrentSong(
+                    this.globalState.songQueue,
+                    'discord',
+                    userId,
+                    null,
+                    member?.id === msg.guild.ownerId ? 'broadcaster' : 
+                    this.isUserModeratorOrBroadcaster(member) ? 'moderator' : 'user'
+                );
+                if (!allowed) {
+                    const errorMsg = `❌ ${username}, ты можешь скипать только свой текущий трек`;
+                    await msg.reply(errorMsg);
+                    this.sendMessageToChat(errorMsg);
+                    return;
+                }
+
+                this.globalState.songQueue.current = null;
+                const next = this.globalState.songQueue.next();
+    
+                if (next) {
+                    this.eventEmitter.emit('music.play', next);
+                    const response = `⏭ Следующий трек: ${next.author} — ${next.title}`;
+                    await msg.reply(response);
+                    this.sendMessageToChat(response);
+                } else {
+                    this.eventEmitter.emit('music.stop');
+                    const response = `⏹ Очередь пуста, воспроизведение остановлено`;
+                    await msg.reply(response);
+                    this.sendMessageToChat(response);
+                }
+    
+                this.eventEmitter.emit('queue.update');
+                return;
+            }
+
+            if (text === '!queue') {
+                const queue = this.globalState.songQueue;
+                let response;
+                if (queue.queue.length > 0) {
+                    const list = queue.list();
+                    const current = queue.current ? 
+                        `🎶 Сейчас: ${queue.current.author} — ${queue.current.title}\n📜 Очередь: ${list}` :
+                        `📜 Очередь: ${list}`;
+                    response = current;
+                } else {
+                    if (queue.current) {
+                        response = `🎶 Сейчас: ${queue.current.author} — ${queue.current.title}\n📭 Очередь пуста`;
+                    } else {
+                        response = `📭 Очередь пуста`;
+                    }
+                }
+                await msg.reply(response);
+                this.sendMessageToChat(response);
+                return;
+            }
+
+            if (text === '!pause' || text === '!play' || text === '!stop') {
+                if (!this.isUserModeratorOrBroadcaster(member)) {
+                    const errorMsg = `❌ ${username}, команда доступна только модераторам и владельцу сервера!`;
+                    await msg.reply(errorMsg);
+                    this.sendMessageToChat(errorMsg);
+                    return;
+                }
+
+                if (text === '!pause') {
+                    this.eventEmitter.emit('music.pause');
+                    const response = `⏸ Трек поставлен на паузу`;
+                    await msg.reply(response);
+                    this.sendMessageToChat(response);
+                } else if (text === '!play') {
+                    this.eventEmitter.emit('music.resume');
+                    const response = `▶️ Продолжаем воспроизведение`;
+                    await msg.reply(response);
+                    this.sendMessageToChat(response);
+                } else if (text === '!stop') {
+                    this.globalState.songQueue.clearCurrent();
+                    this.globalState.songQueue.queue = [];
+                    this.globalState.songQueue.lastRequest.clear();
+                    this.eventEmitter.emit('music.stop');
+                    this.eventEmitter.emit('queue.update');
+                    const response = `⏹ Воспроизведение остановлено, очередь очищена`;
+                    await msg.reply(response);
+                    this.sendMessageToChat(response);
+                }
+                return;
+            }
+
+            // Regular chat
             this.emitChat(
                 userId,
                 `[DC] ${username}`,
@@ -1446,6 +1878,36 @@ class DiscordService extends Platform {
             this.globalState.setPlatformStatus('discord', false);
             this.scheduleReconnect();
         });
+    }
+
+    async handleQueueCommand(msg) {
+        const queue = this.globalState.songQueue;
+        if (queue.queue.length > 0) {
+            const list = queue.list();
+            const current = queue.current ? 
+                `🎶 Сейчас: ${queue.current.author} — ${queue.current.title}\n📜 Очередь: ${list}` :
+                `📜 Очередь: ${list}`;
+            await msg.reply(current);
+        } else {
+            if (queue.current) {
+                await msg.reply(`🎶 Сейчас: ${queue.current.author} — ${queue.current.title}\n📭 Очередь пуста`);
+            } else {
+                await msg.reply(`📭 Очередь пуста`);
+            }
+        }
+    }
+
+    // Проверка прав модератора/владельца сервера для Discord
+    isUserModeratorOrBroadcaster(member) {
+        if (!member) return false;
+    
+        // Владелец сервера
+        if (member.id === member.guild.ownerId) return true;
+    
+        // Проверяем права администратора или модератора
+        return member.permissions.has(PermissionsBitField.Flags.Administrator) ||
+                member.permissions.has(PermissionsBitField.Flags.ManageMessages) ||
+                member.permissions.has(PermissionsBitField.Flags.KickMembers);
     }
 }
 
@@ -1503,14 +1965,14 @@ class StatusUpdater {
 
     setupEventListeners() {
         this.eventEmitter.on('platform.status', () => {
-            this.updateAllStatuses();
+            //this.updateAllStatuses();
         });
     }
 
     startUpdateInterval() {
-        // ⚡ ИЗМЕНИТЕ ЗДЕСЬ: текущее значение 30 секунд (30_000)
+        // ⚡ ИЗМЕНИТЕ ЗДЕСЬ: текущее значение 120 секунд (120_000)
         this.updateInterval = setInterval(() => {
-            this.updateAllStatuses();
+            //this.updateAllStatuses();
         }, 120_000); // ← Это значение в миллисекундах
     }
 
@@ -1521,7 +1983,7 @@ class StatusUpdater {
                 this.globalState.getPlatformStatus('youtube') || 
                 this.globalState.getPlatformStatus('tiktok');
             
-            this.updateStreamStart(anyLive);
+            this.updateStreamStart();
             
             const rawSpeedMBps = await this.getCachedUploadSpeed();
             const uploadMbps = rawSpeedMBps ? +(rawSpeedMBps * 8).toFixed(1) : null;
@@ -1600,12 +2062,9 @@ class StatusUpdater {
         return v;
     }
 
-    updateStreamStart(anyLive) {
-        if (anyLive && !this.globalState.streamStartTs) {
+    updateStreamStart() {
+        if (!this.globalState.streamStartTs) {
             this.globalState.streamStartTs = Date.now();
-        }
-        if (!anyLive) {
-            this.globalState.streamStartTs = null;
         }
     }
 
@@ -1738,7 +2197,10 @@ class TerrariaWebSocketServer {
                 nickname: data.nickname,
                 text: data.text,
                 timestamp: data.timestamp,
-                time: data.time
+                time: data.time,
+                messageId: data.messageId,      // ← ДОБАВЛЕНО
+                extraClass: data.extraClass
+
             });
 
             this.broadcast({
@@ -1749,18 +2211,33 @@ class TerrariaWebSocketServer {
                     nickname: data.nickname,
                     text: data.text,
                     timestamp: data.timestamp,
-                    time: data.time
+                    time: data.time,
+                    messageId: data.messageId,   // ← ДОБАВЛЕНО
+                    extraClass: data.extraClass  // ← ДОБАВЛЕНО
                 }
             });
 
             // Отправляем в Discord (кроме системных сообщений и самого Discord)
-            if (data.userId !== 'system' && data.platform !== 'discord') {
+            //if (data.userId !== 'system' && data.platform !== 'discord') {
+            if (data.userId !== 'system') {
                 this.discordChatSender.sendMessage({
                     platform: data.platform,
                     username: data.nickname,
                     text: data.text
                 });
             }
+        });
+
+        // ДОБАВЬ ЭТО В setupEventListeners() ВМЕСТЕ С ОСТАЛЬНЫМИ this.eventEmitter.on(...)
+        this.eventEmitter.on('chat.update', (data) => {
+            this.broadcast({
+                event: 'chat.update',
+                messageId: data.messageId,
+                platform: data.platform,
+                text: data.text,
+                status: data.status,
+                extraClass: data.extraClass
+            });
         });
 
         this.eventEmitter.on('music.play', (song) => {
@@ -2057,7 +2534,7 @@ class DiscordChatSender {
                     console.log(`✅ Discord chat sender logged in as ${this.client.user.tag}`);
                     try {
                         this.chatChannel = await this.client.channels.fetch(
-                            process.env.DISCORD_CHAT_CHANNEL_ID
+                            process.env.DISCORD_LOG_CHANNEL_ID
                         );
                         resolve();
                     } catch (error) {
